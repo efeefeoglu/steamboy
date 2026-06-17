@@ -11,12 +11,16 @@ from urllib.parse import urlparse
 import imageio_ffmpeg
 import paramiko
 import yt_dlp
+from yt_dlp.utils import download_range_func
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, HttpUrl
 
 SFTP_HOST = "vps38164.dreamhostps.com"
 SFTP_FOLDER = "efeefeoglu.com/steamboy"
 SFTP_FILENAME = "video.mp4"
+SEGMENT_SECONDS = 4
+MAX_SEGMENTS = 10
+MAX_MERGED_DURATION_SECONDS = SEGMENT_SECONDS * MAX_SEGMENTS
 
 app = FastAPI(title="Steamboy", version="0.1.0")
 
@@ -103,6 +107,8 @@ def download_steam_video(steam_url: str, output_directory: Path) -> Path:
     ydl_opts = {
         "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
+        "download_ranges": download_range_func(None, [(0, MAX_MERGED_DURATION_SECONDS)]),
+        "force_keyframes_at_cuts": True,
         "ffmpeg_location": get_ffmpeg_executable(),
         "outtmpl": output_template,
         "quiet": True,
@@ -129,6 +135,8 @@ def convert_to_vertical(source: Path, destination: Path) -> None:
         "-y",
         "-i",
         str(source),
+        "-t",
+        str(MAX_MERGED_DURATION_SECONDS),
         "-vf",
         "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
         "-c:v",

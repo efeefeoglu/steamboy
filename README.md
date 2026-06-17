@@ -1,6 +1,6 @@
 # Steamboy
 
-API service that downloads a trailer video from a Steam game page, converts it to a vertical 1080x1920 (9:16) video, and uploads the result over SFTP.
+API service that downloads up to the first 40 seconds of a trailer video from a Steam game page, converts it to a vertical 1080x1920 (9:16) video, and uploads the result over SFTP.
 
 ## Requirements
 
@@ -37,6 +37,6 @@ uvicorn app.main:app --reload
 }
 ```
 
-The converted video overwrites `efeefeoglu.com/steamboy/video.mp4` on `sftp://vps38164.dreamhostps.com`.
+The service limits the merged download to 10 packages of 4 seconds each (40 seconds total). The converted video overwrites `efeefeoglu.com/steamboy/video.mp4` on `sftp://vps38164.dreamhostps.com`.
 
 For backward compatibility, `POST /steam/video-to-drive` is still available as a deprecated alias that performs the same SFTP upload.
