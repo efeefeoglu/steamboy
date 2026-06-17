@@ -6,16 +6,20 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
+from threading import Lock
 from typing import Annotated
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import imageio_ffmpeg
 import paramiko
 import yt_dlp
-from yt_dlp.utils import download_range_func
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field, HttpUrl
+from yt_dlp.utils import download_range_func
 
 SFTP_HOST = "vps38164.dreamhostps.com"
 SFTP_FOLDER = "efeefeoglu.com/steamboy"
@@ -42,17 +46,121 @@ class SteamVideoResponse(BaseModel):
     sftp_file: SftpUploadResponse
 
 
+class JobStatus(str, Enum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class SteamVideoJobResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    status_url: str
+    source_video_url: str
+    created_at: datetime
+    updated_at: datetime
+    result: SteamVideoResponse | None = None
+    error: str | None = None
+
+
+class SteamVideoJob:
+    def __init__(self, job_id: str, steam_url: str) -> None:
+        now = datetime.now(UTC)
+        self.job_id = job_id
+        self.steam_url = steam_url
+        self.status = JobStatus.queued
+        self.created_at = now
+        self.updated_at = now
+        self.result: SteamVideoResponse | None = None
+        self.error: str | None = None
+
+
+jobs: dict[str, SteamVideoJob] = {}
+jobs_lock = Lock()
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/steam/video-to-sftp", response_model=SteamVideoResponse)
-def steam_video_to_sftp(payload: SteamVideoRequest) -> SteamVideoResponse:
+@app.post("/steam/video-to-sftp", response_model=SteamVideoJobResponse, status_code=202)
+def steam_video_to_sftp(payload: SteamVideoRequest, background_tasks: BackgroundTasks) -> SteamVideoJobResponse:
     steam_url = str(payload.steam_url)
     validate_steam_url(steam_url)
     ensure_ffmpeg()
 
+    job = create_job(steam_url)
+    background_tasks.add_task(process_steam_video_job, job.job_id)
+    return serialize_job(job)
+
+
+@app.get("/steam/video-to-sftp/jobs/{job_id}", response_model=SteamVideoJobResponse)
+def get_steam_video_job(job_id: str) -> SteamVideoJobResponse:
+    job = get_job(job_id)
+    return serialize_job(job)
+
+
+@app.post("/steam/video-to-drive", response_model=SteamVideoJobResponse, status_code=202, deprecated=True)
+def steam_video_to_drive(payload: SteamVideoRequest, background_tasks: BackgroundTasks) -> SteamVideoJobResponse:
+    return steam_video_to_sftp(payload, background_tasks)
+
+
+def create_job(steam_url: str) -> SteamVideoJob:
+    job = SteamVideoJob(job_id=uuid4().hex, steam_url=steam_url)
+    with jobs_lock:
+        jobs[job.job_id] = job
+    return job
+
+
+def get_job(job_id: str) -> SteamVideoJob:
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def serialize_job(job: SteamVideoJob) -> SteamVideoJobResponse:
+    return SteamVideoJobResponse(
+        job_id=job.job_id,
+        status=job.status,
+        status_url=f"/steam/video-to-sftp/jobs/{job.job_id}",
+        source_video_url=job.steam_url,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        result=job.result,
+        error=job.error,
+    )
+
+
+def update_job(job_id: str, **changes: object) -> None:
+    with jobs_lock:
+        job = jobs[job_id]
+        for key, value in changes.items():
+            setattr(job, key, value)
+        job.updated_at = datetime.now(UTC)
+
+
+def process_steam_video_job(job_id: str) -> None:
+    job = get_job(job_id)
+    update_job(job_id, status=JobStatus.running, error=None)
+
+    try:
+        result = process_steam_video(job.steam_url)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else repr(exc.detail)
+        update_job(job_id, status=JobStatus.failed, error=detail)
+        return
+    except Exception as exc:  # noqa: BLE001 - preserve failure details for job polling.
+        update_job(job_id, status=JobStatus.failed, error=str(exc))
+        return
+
+    update_job(job_id, status=JobStatus.completed, result=result)
+
+
+def process_steam_video(steam_url: str) -> SteamVideoResponse:
     work_root = Path(os.getenv("WORK_DIR", "/tmp/steamboy"))
     work_root.mkdir(parents=True, exist_ok=True)
 
@@ -65,11 +173,6 @@ def steam_video_to_sftp(payload: SteamVideoRequest) -> SteamVideoResponse:
         sftp_file = upload_to_sftp(output_path)
 
     return SteamVideoResponse(source_video_url=steam_url, sftp_file=sftp_file)
-
-
-@app.post("/steam/video-to-drive", response_model=SteamVideoResponse, deprecated=True)
-def steam_video_to_drive(payload: SteamVideoRequest) -> SteamVideoResponse:
-    return steam_video_to_sftp(payload)
 
 
 def validate_steam_url(url: str) -> None:
