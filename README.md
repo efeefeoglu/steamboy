@@ -37,6 +37,25 @@ uvicorn app.main:app --reload
 }
 ```
 
+The endpoint validates the request, creates an in-memory background job, and immediately returns `202 Accepted` so the HTTP request does not wait for the download, conversion, and SFTP upload to finish.
+
+```json
+{
+  "job_id": "1d4b8c0c2af54c57801f1dcb5f9d2f1c",
+  "status": "queued",
+  "status_url": "/steam/video-to-sftp/jobs/1d4b8c0c2af54c57801f1dcb5f9d2f1c",
+  "source_video_url": "https://store.steampowered.com/app/730/CounterStrike_2/",
+  "created_at": "2026-06-17T12:00:00Z",
+  "updated_at": "2026-06-17T12:00:00Z",
+  "result": null,
+  "error": null
+}
+```
+
+Poll `GET /steam/video-to-sftp/jobs/{job_id}` to check the job. A completed job includes the final SFTP upload details in `result`; a failed job includes an error message in `error`.
+
+Job data is stored in process memory. Restarting the API process clears queued, running, and completed jobs.
+
 The service limits the merged download to 10 packages of 4 seconds each (40 seconds total). The converted video overwrites `efeefeoglu.com/steamboy/video.mp4` on `sftp://vps38164.dreamhostps.com`.
 
-For backward compatibility, `POST /steam/video-to-drive` is still available as a deprecated alias that performs the same SFTP upload.
+For backward compatibility, `POST /steam/video-to-drive` is still available as a deprecated alias that creates the same background SFTP upload job.
