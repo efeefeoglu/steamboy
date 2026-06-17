@@ -1,8 +1,7 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 requests==2.32.3
-google-api-python-client==2.159.0
-google-auth==2.37.0
+paramiko==3.5.0
 python-multipart==0.0.20
 pydantic==2.10.5
 imageio-ffmpeg==0.5.1
