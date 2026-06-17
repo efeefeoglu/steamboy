@@ -1,48 +1,42 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
-import uuid
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated
 from urllib.parse import urlparse
 
 import imageio_ffmpeg
+import paramiko
 import requests
 from fastapi import FastAPI, HTTPException
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError, ResumableUploadError
-from googleapiclient.http import MediaFileUpload
 from pydantic import BaseModel, Field, HttpUrl
 
-GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 STEAM_URL_RE = re.compile(r"^https?://store\.steampowered\.com/app/\d+", re.IGNORECASE)
 MP4_RE = re.compile(r'https?:\\?/\\?/[^"\\]+?\.mp4[^"\\]*', re.IGNORECASE)
+SFTP_HOST = "vps38164.dreamhostps.com"
+SFTP_FOLDER = "efeefeoglu.com/steamboy"
+SFTP_FILENAME = "video.mp4"
 
 app = FastAPI(title="Steamboy", version="0.1.0")
 
 
 class SteamVideoRequest(BaseModel):
     steam_url: Annotated[HttpUrl, Field(description="Steam store game page URL")]
-    folder_id: Annotated[str | None, Field(description="Google Drive folder id override")] = None
-    filename: Annotated[str | None, Field(description="Uploaded filename. Defaults to a generated mp4 name")] = None
 
 
-class DriveUploadResponse(BaseModel):
-    file_id: str
-    name: str
-    web_view_link: str | None = None
-    web_content_link: str | None = None
+class SftpUploadResponse(BaseModel):
+    host: str
+    path: str
+    filename: str
 
 
 class SteamVideoResponse(BaseModel):
     source_video_url: str
-    drive_file: DriveUploadResponse
+    sftp_file: SftpUploadResponse
 
 
 @app.get("/health")
@@ -50,8 +44,8 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/steam/video-to-drive", response_model=SteamVideoResponse)
-def steam_video_to_drive(payload: SteamVideoRequest) -> SteamVideoResponse:
+@app.post("/steam/video-to-sftp", response_model=SteamVideoResponse)
+def steam_video_to_sftp(payload: SteamVideoRequest) -> SteamVideoResponse:
     steam_url = str(payload.steam_url)
     validate_steam_url(steam_url)
     ensure_ffmpeg()
@@ -63,14 +57,18 @@ def steam_video_to_drive(payload: SteamVideoRequest) -> SteamVideoResponse:
         tmp_dir = Path(tmp)
         source_url = find_first_steam_video(steam_url)
         source_path = tmp_dir / "source.mp4"
-        output_name = sanitize_filename(payload.filename) if payload.filename else f"steam-video-{uuid.uuid4().hex}.mp4"
-        output_path = tmp_dir / output_name
+        output_path = tmp_dir / SFTP_FILENAME
 
         download_video(source_url, source_path)
         convert_to_vertical(source_path, output_path)
-        drive_file = upload_to_drive(output_path, payload.folder_id)
+        sftp_file = upload_to_sftp(output_path)
 
-    return SteamVideoResponse(source_video_url=source_url, drive_file=drive_file)
+    return SteamVideoResponse(source_video_url=source_url, sftp_file=sftp_file)
+
+
+@app.post("/steam/video-to-drive", response_model=SteamVideoResponse, deprecated=True)
+def steam_video_to_drive(payload: SteamVideoRequest) -> SteamVideoResponse:
+    return steam_video_to_sftp(payload)
 
 
 def validate_steam_url(url: str) -> None:
@@ -182,95 +180,35 @@ def convert_to_vertical(source: Path, destination: Path) -> None:
         raise HTTPException(status_code=500, detail=f"ffmpeg failed: {completed.stderr[-1000:]}")
 
 
-def upload_to_drive(file_path: Path, folder_id: str | None) -> DriveUploadResponse:
-    credentials = load_drive_credentials()
-    service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+def upload_to_sftp(file_path: Path) -> SftpUploadResponse:
+    username = os.getenv("SFTP_USER")
+    password = os.getenv("SFTP_PASS")
+    if not username or not password:
+        raise HTTPException(status_code=500, detail="SFTP credentials are not configured. Set SFTP_USER and SFTP_PASS.")
 
-    metadata: dict[str, object] = {"name": file_path.name}
-    parent = folder_id or os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-    if parent:
-        metadata["parents"] = [parent]
-
-    media = MediaFileUpload(str(file_path), mimetype="video/mp4", resumable=True)
+    remote_path = f"{SFTP_FOLDER}/{SFTP_FILENAME}"
     try:
-        created = (
-            service.files()
-            .create(
-                body=metadata,
-                media_body=media,
-                fields="id,name,webViewLink,webContentLink",
-                supportsAllDrives=True,
-            )
-            .execute()
-        )
-    except (HttpError, ResumableUploadError) as exc:
-        handle_drive_upload_error(exc)
-    return DriveUploadResponse(
-        file_id=created["id"],
-        name=created["name"],
-        web_view_link=created.get("webViewLink"),
-        web_content_link=created.get("webContentLink"),
-    )
+        transport = paramiko.Transport((SFTP_HOST, 22))
+        transport.connect(username=username, password=password)
+        with paramiko.SFTPClient.from_transport(transport) as sftp:
+            ensure_remote_directory(sftp, SFTP_FOLDER)
+            sftp.put(str(file_path), remote_path, confirm=True)
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail=f"SFTP upload failed: {exc}") from exc
+    except paramiko.SSHException as exc:
+        raise HTTPException(status_code=502, detail=f"SFTP upload failed: {exc}") from exc
+    finally:
+        if "transport" in locals():
+            transport.close()
+
+    return SftpUploadResponse(host=SFTP_HOST, path=remote_path, filename=SFTP_FILENAME)
 
 
-def load_drive_credentials() -> service_account.Credentials:
-    json_payload = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if json_payload:
-        info = json.loads(json_payload)
-        return service_account.Credentials.from_service_account_info(info, scopes=[GOOGLE_DRIVE_SCOPE])
-
-    credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if credentials_path:
-        return service_account.Credentials.from_service_account_file(credentials_path, scopes=[GOOGLE_DRIVE_SCOPE])
-
-    raise HTTPException(
-        status_code=500,
-        detail="Google Drive credentials are not configured. Set GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_SERVICE_ACCOUNT_JSON.",
-    )
-
-
-def sanitize_filename(filename: str) -> str:
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", filename).strip("._")
-    if not safe:
-        safe = f"steam-video-{uuid.uuid4().hex}.mp4"
-    if not safe.lower().endswith(".mp4"):
-        safe += ".mp4"
-    return safe
-
-
-def handle_drive_upload_error(exc: HttpError | ResumableUploadError) -> NoReturn:
-    reason = get_google_api_error_reason(exc)
-    if reason == "storageQuotaExceeded":
-        raise HTTPException(
-            status_code=507,
-            detail=(
-                "Google Drive upload failed because the configured service account has no personal "
-                "Drive storage quota. Upload to a Shared Drive or shared folder by setting "
-                "GOOGLE_DRIVE_FOLDER_ID or the request folder_id to a folder the service account can "
-                "access, or switch to OAuth/domain-wide delegation for a user with quota."
-            ),
-        ) from exc
-
-    raise HTTPException(status_code=502, detail=f"Google Drive upload failed: {exc}") from exc
-
-
-def get_google_api_error_reason(exc: HttpError | ResumableUploadError) -> str | None:
-    error_details = getattr(exc, "error_details", None)
-    if isinstance(error_details, list):
-        for detail in error_details:
-            if isinstance(detail, dict) and detail.get("reason"):
-                return str(detail["reason"])
-
-    content = getattr(exc, "content", None)
-    if isinstance(content, bytes):
+def ensure_remote_directory(sftp: paramiko.SFTPClient, remote_directory: str) -> None:
+    current = ""
+    for part in remote_directory.strip("/").split("/"):
+        current = f"{current}/{part}" if current else part
         try:
-            payload = json.loads(content.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        errors = payload.get("error", {}).get("errors", [])
-        if isinstance(errors, list):
-            for detail in errors:
-                if isinstance(detail, dict) and detail.get("reason"):
-                    return str(detail["reason"])
-
-    return None
+            sftp.stat(current)
+        except OSError:
+            sftp.mkdir(current)
