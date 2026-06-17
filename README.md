@@ -7,6 +7,7 @@ API service that downloads a trailer video from a Steam game page, converts it t
 - Python 3.11+
 - `ffmpeg` available on `PATH`, a custom `FFMPEG_BINARY`, or the bundled `imageio-ffmpeg` binary installed from `requirements.txt`
 - Google service account credentials JSON
+- A Google Drive destination that can accept service-account uploads. Service accounts do not have personal Drive storage quota, so uploads must target a folder in a Shared Drive or another folder the service account can access, or you must use OAuth/domain-wide delegation for a user with quota.
 
 ## Configuration
 
@@ -17,7 +18,7 @@ Set one of the following environment variables for Google Drive authentication:
 
 Optional:
 
-- `GOOGLE_DRIVE_FOLDER_ID`: default Drive folder for uploads
+- `GOOGLE_DRIVE_FOLDER_ID`: default Drive folder for uploads. For service-account authentication, set this to a folder in a Shared Drive or another folder explicitly shared with the service account; otherwise Google Drive may return `storageQuotaExceeded`.
 - `WORK_DIR`: temporary workspace path (default: `/tmp/steamboy`)
 - `FFMPEG_BINARY`: optional path to an ffmpeg executable; if unset, the service uses system `ffmpeg` first and then falls back to `imageio-ffmpeg`
 
