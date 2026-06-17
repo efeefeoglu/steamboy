@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
+import imageio_ffmpeg
 import requests
 from fastapi import FastAPI, HTTPException
 from google.oauth2 import service_account
@@ -77,9 +78,23 @@ def validate_steam_url(url: str) -> None:
         raise HTTPException(status_code=400, detail="steam_url must be a Steam store app URL")
 
 
+def get_ffmpeg_executable() -> str:
+    configured = os.getenv("FFMPEG_BINARY")
+    if configured:
+        return configured
+
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
 def ensure_ffmpeg() -> None:
-    if shutil.which("ffmpeg") is None:
-        raise HTTPException(status_code=500, detail="ffmpeg is required but was not found on PATH")
+    ffmpeg_path = get_ffmpeg_executable()
+    completed = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"ffmpeg is not executable: {completed.stderr[-1000:]}")
 
 
 def find_first_steam_video(steam_url: str) -> str:
@@ -141,7 +156,7 @@ def download_video(url: str, destination: Path) -> None:
 
 def convert_to_vertical(source: Path, destination: Path) -> None:
     command = [
-        "ffmpeg",
+        get_ffmpeg_executable(),
         "-y",
         "-i",
         str(source),

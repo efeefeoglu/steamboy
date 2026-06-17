@@ -5,7 +5,7 @@ API service that downloads a trailer video from a Steam game page, converts it t
 ## Requirements
 
 - Python 3.11+
-- `ffmpeg` available on `PATH`
+- `ffmpeg` available on `PATH`, a custom `FFMPEG_BINARY`, or the bundled `imageio-ffmpeg` binary installed from `requirements.txt`
 - Google service account credentials JSON
 
 ## Configuration
@@ -19,6 +19,7 @@ Optional:
 
 - `GOOGLE_DRIVE_FOLDER_ID`: default Drive folder for uploads
 - `WORK_DIR`: temporary workspace path (default: `/tmp/steamboy`)
+- `FFMPEG_BINARY`: optional path to an ffmpeg executable; if unset, the service uses system `ffmpeg` first and then falls back to `imageio-ffmpeg`
 
 ## Run locally
 
