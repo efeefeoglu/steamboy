@@ -103,6 +103,7 @@ def download_steam_video(steam_url: str, output_directory: Path) -> Path:
     ydl_opts = {
         "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
+        "ffmpeg_location": get_ffmpeg_executable(),
         "outtmpl": output_template,
         "quiet": True,
         "no_warnings": True,
