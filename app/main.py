@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 from urllib.parse import urlparse
 
 import imageio_ffmpeg
@@ -16,6 +16,7 @@ import requests
 from fastapi import FastAPI, HTTPException
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError, ResumableUploadError
 from googleapiclient.http import MediaFileUpload
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -191,11 +192,19 @@ def upload_to_drive(file_path: Path, folder_id: str | None) -> DriveUploadRespon
         metadata["parents"] = [parent]
 
     media = MediaFileUpload(str(file_path), mimetype="video/mp4", resumable=True)
-    created = (
-        service.files()
-        .create(body=metadata, media_body=media, fields="id,name,webViewLink,webContentLink")
-        .execute()
-    )
+    try:
+        created = (
+            service.files()
+            .create(
+                body=metadata,
+                media_body=media,
+                fields="id,name,webViewLink,webContentLink",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+    except (HttpError, ResumableUploadError) as exc:
+        handle_drive_upload_error(exc)
     return DriveUploadResponse(
         file_id=created["id"],
         name=created["name"],
@@ -227,3 +236,41 @@ def sanitize_filename(filename: str) -> str:
     if not safe.lower().endswith(".mp4"):
         safe += ".mp4"
     return safe
+
+
+def handle_drive_upload_error(exc: HttpError | ResumableUploadError) -> NoReturn:
+    reason = get_google_api_error_reason(exc)
+    if reason == "storageQuotaExceeded":
+        raise HTTPException(
+            status_code=507,
+            detail=(
+                "Google Drive upload failed because the configured service account has no personal "
+                "Drive storage quota. Upload to a Shared Drive or shared folder by setting "
+                "GOOGLE_DRIVE_FOLDER_ID or the request folder_id to a folder the service account can "
+                "access, or switch to OAuth/domain-wide delegation for a user with quota."
+            ),
+        ) from exc
+
+    raise HTTPException(status_code=502, detail=f"Google Drive upload failed: {exc}") from exc
+
+
+def get_google_api_error_reason(exc: HttpError | ResumableUploadError) -> str | None:
+    error_details = getattr(exc, "error_details", None)
+    if isinstance(error_details, list):
+        for detail in error_details:
+            if isinstance(detail, dict) and detail.get("reason"):
+                return str(detail["reason"])
+
+    content = getattr(exc, "content", None)
+    if isinstance(content, bytes):
+        try:
+            payload = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        errors = payload.get("error", {}).get("errors", [])
+        if isinstance(errors, list):
+            for detail in errors:
+                if isinstance(detail, dict) and detail.get("reason"):
+                    return str(detail["reason"])
+
+    return None
