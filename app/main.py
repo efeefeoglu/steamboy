@@ -4,6 +4,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
@@ -95,6 +97,42 @@ def get_ffmpeg_executable() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+def ffmpeg_environment(ffmpeg_path: str) -> dict[str, str]:
+    env = os.environ.copy()
+    ffmpeg_directory = str(Path(ffmpeg_path).expanduser().resolve().parent)
+    env["PATH"] = f"{ffmpeg_directory}{os.pathsep}{env.get('PATH', '')}"
+    return env
+
+
+def prepare_ffmpeg_location(ffmpeg_path: str, output_directory: Path) -> Path:
+    ffmpeg_source = Path(ffmpeg_path).expanduser().resolve()
+    ffmpeg_bin = output_directory / "ffmpeg-bin"
+    ffmpeg_bin.mkdir(exist_ok=True)
+    ffmpeg_link = ffmpeg_bin / "ffmpeg"
+
+    if not ffmpeg_link.exists():
+        try:
+            ffmpeg_link.symlink_to(ffmpeg_source)
+        except OSError:
+            shutil.copy2(ffmpeg_source, ffmpeg_link)
+            ffmpeg_link.chmod(0o755)
+
+    return ffmpeg_bin
+
+
+@contextmanager
+def ffmpeg_directory_on_path(ffmpeg_directory: Path) -> Iterator[None]:
+    original_path = os.environ.get("PATH")
+    os.environ["PATH"] = f"{ffmpeg_directory}{os.pathsep}{original_path or ''}"
+    try:
+        yield
+    finally:
+        if original_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = original_path
+
+
 def ensure_ffmpeg() -> None:
     ffmpeg_path = get_ffmpeg_executable()
     completed = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True, check=False)
@@ -104,20 +142,22 @@ def ensure_ffmpeg() -> None:
 
 def download_steam_video(steam_url: str, output_directory: Path) -> Path:
     output_template = str(output_directory / "source.%(ext)s")
+    ffmpeg_directory = prepare_ffmpeg_location(get_ffmpeg_executable(), output_directory)
     ydl_opts = {
         "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
         "download_ranges": download_range_func(None, [(0, MAX_MERGED_DURATION_SECONDS)]),
         "force_keyframes_at_cuts": True,
-        "ffmpeg_location": get_ffmpeg_executable(),
+        "ffmpeg_location": str(ffmpeg_directory),
         "outtmpl": output_template,
         "quiet": True,
         "no_warnings": True,
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([steam_url])
+        with ffmpeg_directory_on_path(ffmpeg_directory):
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([steam_url])
     except yt_dlp.utils.DownloadError as exc:
         raise HTTPException(status_code=502, detail=f"Steam video download failed: {exc}") from exc
 
@@ -153,7 +193,9 @@ def convert_to_vertical(source: Path, destination: Path) -> None:
         "+faststart",
         str(destination),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    completed = subprocess.run(
+        command, capture_output=True, text=True, check=False, env=ffmpeg_environment(command[0])
+    )
     if completed.returncode != 0:
         raise HTTPException(status_code=500, detail=f"ffmpeg failed: {completed.stderr[-1000:]}")
 
