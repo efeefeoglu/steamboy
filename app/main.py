@@ -95,6 +95,24 @@ def get_ffmpeg_executable() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+def get_yt_dlp_ffmpeg_location() -> str:
+    ffmpeg_path = Path(get_ffmpeg_executable())
+
+    if ffmpeg_path.name == "ffmpeg":
+        return str(ffmpeg_path.parent)
+
+    shim_directory = Path(os.getenv("WORK_DIR", "/tmp/steamboy")) / "ffmpeg-bin"
+    shim_directory.mkdir(parents=True, exist_ok=True)
+    shim_path = shim_directory / "ffmpeg"
+    shim_content = f'#!/bin/sh\nexec "{ffmpeg_path}" "$@"\n'
+
+    if not shim_path.exists() or shim_path.read_text() != shim_content:
+        shim_path.write_text(shim_content)
+        shim_path.chmod(0o755)
+
+    return str(shim_directory)
+
+
 def ensure_ffmpeg() -> None:
     ffmpeg_path = get_ffmpeg_executable()
     completed = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True, check=False)
@@ -109,7 +127,7 @@ def download_steam_video(steam_url: str, output_directory: Path) -> Path:
         "merge_output_format": "mp4",
         "download_ranges": download_range_func(None, [(0, MAX_MERGED_DURATION_SECONDS)]),
         "force_keyframes_at_cuts": True,
-        "ffmpeg_location": get_ffmpeg_executable(),
+        "ffmpeg_location": get_yt_dlp_ffmpeg_location(),
         "outtmpl": output_template,
         "quiet": True,
         "no_warnings": True,
