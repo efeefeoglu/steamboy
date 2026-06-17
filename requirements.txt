@@ -5,3 +5,4 @@ paramiko==3.5.0
 python-multipart==0.0.20
 pydantic==2.10.5
 imageio-ffmpeg==0.5.1
+yt-dlp==2026.6.9
