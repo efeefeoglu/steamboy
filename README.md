@@ -42,14 +42,16 @@ Opens a dashboard backed by the Neon Postgres table below:
 CREATE TABLE "steam" (
   "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "steam_id_seq"),
   "steamurl" text,
-  "name" text
+  "name" text,
+  "run" timestamptz
 );
 ```
 
 The dashboard supports:
 
 - Adding a Steam store URL
-- Running a saved Steam store URL as a background SFTP upload job
+- Running a saved Steam store URL as a background SFTP upload job without leaving the dashboard
+- Showing the latest run time as a relative timestamp and revealing a Video button when the upload finishes
 - Deleting saved Steam store URLs
 
 If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error.
@@ -79,7 +81,7 @@ The endpoint validates the request, creates an in-memory background job, and imm
 }
 ```
 
-Poll `GET /steam/video-to-sftp/jobs/{job_id}` to check the job. A completed job includes the final SFTP upload details in `result`; a failed job includes an error message in `error`.
+Poll `GET /steam/video-to-sftp/jobs/{job_id}` to check the job. A completed job includes the final SFTP upload details in `result`, including a public video URL at `result.sftp_file.public_url`; a failed job includes an error message in `error`.
 
 Job data is stored in process memory. Restarting the API process clears queued, running, and completed jobs.
 
