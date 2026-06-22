@@ -218,7 +218,7 @@ def dashboard() -> HTMLResponse:
       color: white;
       display: inline-flex;
       font-weight: 800;
-      padding: 8px 12px;
+      padding: 13px 18px;
       text-decoration: none;
     }}
     .error-text {{
