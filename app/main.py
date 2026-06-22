@@ -229,7 +229,7 @@ def dashboard() -> HTMLResponse:
       border-bottom: 1px solid rgba(148, 163, 184, 0.18);
       padding: 14px 10px;
       text-align: left;
-      vertical-align: top;
+      vertical-align: middle;
     }}
     th {{
       color: #93c5fd;
