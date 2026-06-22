@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -13,7 +14,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import imageio_ffmpeg
@@ -668,7 +669,14 @@ def build_output_filename(steam_url: str) -> str:
 
 
 def build_output_filename_from_name(name: str) -> str:
-    return f"{quote(name, safe='')}.mp4"
+    return f"{sanitize_video_filename_stem(name)}.mp4"
+
+
+def sanitize_video_filename_stem(name: str) -> str:
+    dashed_name = re.sub(r"\s+", "-", name.strip())
+    supported_name = re.sub(r"[^A-Za-z0-9_-]+", "", dashed_name)
+    collapsed_name = re.sub(r"-+", "-", supported_name).strip("-")
+    return collapsed_name or "video"
 
 
 def build_public_video_url(filename: str) -> str:
@@ -681,7 +689,7 @@ def build_public_video_url_from_field(video: str) -> str:
         return ""
     if filename.lower().endswith(".mp4"):
         stem = filename[:-4]
-        return build_public_video_url(f"{quote(stem, safe='%')}.mp4")
+        return build_public_video_url(build_output_filename_from_name(stem))
     return build_public_video_url(build_output_filename_from_name(filename))
 
 
