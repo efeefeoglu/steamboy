@@ -231,16 +231,58 @@ def dashboard() -> HTMLResponse:
       padding: 13px 18px;
       text-decoration: none;
     }}
-    .review-content {{
+    .name-cell {{
+      align-items: center;
+      display: flex;
+      gap: 10px;
+      position: relative;
+    }}
+    .review-tooltip-trigger {{
+      align-items: center;
+      background: rgba(147, 51, 234, 0.22);
+      border: 1px solid rgba(196, 181, 253, 0.4);
+      border-radius: 999px;
+      color: #ddd6fe;
+      cursor: help;
+      display: inline-flex;
+      font-size: 0.78rem;
+      font-weight: 900;
+      height: 1.45rem;
+      justify-content: center;
+      line-height: 1;
+      width: 1.45rem;
+    }}
+    .review-tooltip {{
+      background: rgba(15, 23, 42, 0.98);
+      border: 1px solid rgba(196, 181, 253, 0.38);
+      border-radius: 18px;
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
       color: #cbd5e1;
       font-size: 0.92rem;
-      margin-top: 8px;
-      max-width: 26rem;
+      left: calc(100% + 12px);
+      line-height: 1.5;
+      min-width: min(22rem, 70vw);
+      opacity: 0;
+      padding: 14px 16px;
+      pointer-events: none;
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%) translateX(-6px);
+      transition: opacity 0.16s ease, transform 0.16s ease;
+      visibility: hidden;
+      z-index: 10;
     }}
-    .review-content strong {{
+    .review-tooltip strong {{
       color: #f8fafc;
       display: block;
-      margin-bottom: 2px;
+      font-size: 1rem;
+      margin-bottom: 6px;
+    }}
+    .review-tooltip-trigger:hover + .review-tooltip,
+    .review-tooltip-trigger:focus + .review-tooltip {{
+      opacity: 1;
+      transform: translateY(-50%);
+      visibility: visible;
     }}
     .error-text {{
       color: #fca5a5;
@@ -288,6 +330,15 @@ def dashboard() -> HTMLResponse:
       }}
       .actions {{
         justify-content: flex-start;
+      }}
+      .review-tooltip {{
+        left: 0;
+        top: calc(100% + 8px);
+        transform: translateY(-4px);
+      }}
+      .review-tooltip-trigger:hover + .review-tooltip,
+      .review-tooltip-trigger:focus + .review-tooltip {{
+        transform: translateY(0);
       }}
       th:nth-child(1), td:nth-child(1) {{
         display: none;
@@ -406,7 +457,8 @@ def dashboard() -> HTMLResponse:
         const row = form.closest("tr");
         const button = form.querySelector("button");
         const status = row.querySelector("[data-run-status]");
-        const review = row.querySelector("[data-review-content]");
+        const review = row.querySelector("[data-review-tooltip]");
+        const reviewTrigger = row.querySelector("[data-review-tooltip-trigger]");
 
         button.disabled = true;
         status.textContent = "Reviewing…";
@@ -415,6 +467,7 @@ def dashboard() -> HTMLResponse:
           if (!response.ok) throw new Error(await response.text() || "Review failed");
           const data = await response.json();
           review.innerHTML = `<strong>${{escapeHtml(data.title || "Untitled")}}</strong><span>${{escapeHtml(data.body || "")}}</span>`;
+          reviewTrigger.hidden = false;
           status.textContent = "Review saved";
         }} catch (error) {{
           status.innerHTML = `<span class="error-text">${{escapeHtml(error.message)}}</span>`;
@@ -586,11 +639,15 @@ def render_steam_record_row(record: SteamRecord) -> str:
     video_button = ""
     review_title = escape(record.title or "", quote=True)
     review_body = escape(record.body or "", quote=True)
+    has_review = bool(record.title or record.body)
     review_content = ""
-    if record.title or record.body:
-        review_content = f'<div class="review-content" data-review-content><strong>{review_title or "Untitled"}</strong><span>{review_body}</span></div>'
-    else:
-        review_content = '<div class="review-content" data-review-content></div>'
+    if has_review:
+        review_content = f'<strong>{review_title or "Untitled"}</strong><span>{review_body}</span>'
+    review_tooltip = (
+        f'<span class="review-tooltip-trigger" data-review-tooltip-trigger tabindex="0" '
+        f'aria-label="Show saved review for {escaped_name or "this game"}"{("" if has_review else " hidden")}>i</span>'
+        f'<div class="review-tooltip" data-review-tooltip role="tooltip">{review_content}</div>'
+    )
     if record.video:
         video_url = build_public_video_url_from_field(record.video)
         video_button = (
@@ -599,7 +656,7 @@ def render_steam_record_row(record: SteamRecord) -> str:
         )
     return f"""<tr>
   <td>{record.id}</td>
-  <td>{name_cell}</td>
+  <td><div class="name-cell">{name_cell}{review_tooltip}</div></td>
   <td><span data-run-at="{escape(run_at, quote=True)}"></span></td>
   <td>
     <div class="actions">
@@ -614,7 +671,6 @@ def render_steam_record_row(record: SteamRecord) -> str:
         <button class="danger" type="submit">Delete</button>
       </form>
     </div>
-    {review_content}
   </td>
 </tr>"""
 
