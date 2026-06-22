@@ -395,7 +395,7 @@ def create_steam_url(steamurl: Annotated[str, Form()]) -> RedirectResponse:
     return RedirectResponse("/", status_code=303)
 
 
-@app.post("/steam-urls/{record_id}/run")
+@app.post("/steam-urls/{record_id}/run", response_model=None)
 def run_steam_url(record_id: int, background_tasks: BackgroundTasks, request: Request) -> JSONResponse | RedirectResponse:
     record = get_steam_record(record_id)
     if not record.steamurl:
