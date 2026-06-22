@@ -18,6 +18,7 @@ Set the following environment variables for SFTP authentication:
 - `SFTP_PASS`: SFTP password
 - `NEON_DB_URL`: Neon Postgres connection URL used by the dashboard
 - `OPENAI_API_KEY`: API key used by the Review button to generate social posts
+- `BUFFER_API_KEY`: API key used by the Share button to schedule generated videos on all connected Buffer TikTok, YouTube, and Instagram channels
 
 Optional:
 
@@ -60,8 +61,9 @@ The dashboard supports:
 - Saving the uploaded SFTP filename in the `video` field when a dashboard run finishes
 - Showing the latest run time as a relative timestamp and showing a Video button when the `video` field has a value
 - Deleting saved Steam store URLs
+- Scheduling the uploaded video through Buffer on every connected TikTok, YouTube, and Instagram channel
 
-If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error. The Review button sends the Steam URL to the configured OpenAI model with the prompt: `Write a short casual social media reaction/review post with: a short title, a post body.`
+If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error. The Review button sends the Steam URL to the configured OpenAI model with the prompt: `Write a short casual social media reaction/review post with: a short title, a post body.` The Share button requires a previously generated video, fetches all Buffer channels, filters connected TikTok, YouTube, and Instagram profiles, and schedules the video by adding one Buffer post per channel to its queue. The scheduled post text uses the saved review title/body when present, otherwise the game name, plus the public video URL.
 
 ### Video processing API
 
