@@ -794,31 +794,34 @@ def list_buffer_target_channels() -> list[BufferChannel]:
 
 
 def create_buffer_video_post(channel: BufferChannel, text: str, video_url: str) -> BufferSharePost:
+    title = build_buffer_video_title(text)
     data = buffer_graphql_request(
-        f"""
-        mutation CreateScheduledVideoPost {{
-          createPost(
-            input: {{
-              text: {graphql_string(text)}
-              channelId: {graphql_string(channel.id)}
-              schedulingType: automatic
-              mode: addToQueue
-              assets: [{{ video: {{ url: {graphql_string(video_url)} }} }}]
-            }}
-          ) {{
-            ... on PostActionSuccess {{
-              post {{
+        """
+        mutation CreateScheduledVideoPost($input: CreatePostInput!) {
+          createPost(input: $input) {
+            ... on PostActionSuccess {
+              post {
                 id
                 channelId
                 dueAt
-              }}
-            }}
-            ... on MutationError {{
+              }
+            }
+            ... on MutationError {
               message
-            }}
-          }}
-        }}
-        """
+            }
+          }
+        }
+        """,
+        {
+            "input": {
+                "text": text,
+                "channelId": channel.id,
+                "schedulingType": "automatic",
+                "mode": "addToQueue",
+                "metadata": build_buffer_post_metadata(channel.service, title),
+                "assets": [{"video": {"url": video_url, "metadata": {"title": title}}}],
+            }
+        },
     )
     result = data.get("createPost")
     if not isinstance(result, dict):
@@ -839,8 +842,19 @@ def create_buffer_video_post(channel: BufferChannel, text: str, video_url: str) 
     )
 
 
-def graphql_string(value: str) -> str:
-    return json.dumps(value)
+def build_buffer_video_title(text: str) -> str:
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "Steamboy video")
+    return first_line[:100] or "Steamboy video"
+
+
+def build_buffer_post_metadata(service: str, title: str) -> dict[str, dict[str, object]]:
+    if service == "instagram":
+        return {"instagram": {"type": "reel", "shouldShareToFeed": True}}
+    if service == "youtube":
+        return {"youtube": {"title": title, "privacy": "public", "madeForKids": False}}
+    if service == "tiktok":
+        return {"tiktok": {"isAiGenerated": False}}
+    return {}
 
 
 def buffer_graphql_request(query: str, variables: dict | None = None) -> dict:
@@ -857,6 +871,12 @@ def buffer_graphql_request(query: str, variables: dict | None = None) -> dict:
         )
         response.raise_for_status()
         payload = response.json()
+    except requests.HTTPError as exc:
+        response_text = exc.response.text[:1000] if exc.response is not None else ""
+        detail = f"Buffer API request failed: {exc}"
+        if response_text:
+            detail = f"{detail}. Response: {response_text}"
+        raise HTTPException(status_code=502, detail=detail) from exc
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"Buffer API request failed: {exc}") from exc
     except ValueError as exc:
