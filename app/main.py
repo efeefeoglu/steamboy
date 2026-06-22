@@ -38,6 +38,7 @@ REVIEW_PROMPT = (
     "a short title, a post body."
 )
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+BUFFER_API_URL = "https://api.buffer.com"
 
 app = FastAPI(title="Steamboy", version="0.1.0")
 
@@ -66,6 +67,25 @@ class SftpUploadResponse(BaseModel):
 class SteamVideoResponse(BaseModel):
     source_video_url: str
     sftp_file: SftpUploadResponse
+
+
+class BufferChannel(BaseModel):
+    id: str
+    name: str | None = None
+    service: str
+
+
+class BufferSharePost(BaseModel):
+    id: str
+    channel_id: str
+    channel_name: str | None = None
+    service: str
+    due_at: datetime | None = None
+
+
+class BufferShareResponse(BaseModel):
+    video_url: str
+    posts: list[BufferSharePost]
 
 
 class JobStatus(str, Enum):
@@ -220,6 +240,9 @@ def dashboard() -> HTMLResponse:
     }}
     .review-button {{
       background: #9333ea;
+    }}
+    .share-button {{
+      background: #0284c7;
     }}
     .video-button {{
       align-items: center;
@@ -477,6 +500,29 @@ def dashboard() -> HTMLResponse:
       }});
     }});
 
+    document.querySelectorAll("[data-share-form]").forEach((form) => {{
+      form.addEventListener("submit", async (event) => {{
+        event.preventDefault();
+        const row = form.closest("tr");
+        const button = form.querySelector("button");
+        const status = row.querySelector("[data-run-status]");
+
+        button.disabled = true;
+        status.textContent = "Sharing…";
+        try {{
+          const response = await fetch(form.action, {{ method: "POST", headers: {{ Accept: "application/json" }} }});
+          if (!response.ok) throw new Error(await response.text() || "Share failed");
+          const data = await response.json();
+          const count = data.posts ? data.posts.length : 0;
+          status.textContent = `Scheduled ${{count}} Buffer post${{count === 1 ? "" : "s"}}`;
+        }} catch (error) {{
+          status.innerHTML = `<span class="error-text">${{escapeHtml(error.message)}}</span>`;
+        }} finally {{
+          button.disabled = false;
+        }}
+      }});
+    }});
+
     const escapeHtml = (value) => String(value)
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
@@ -540,6 +586,18 @@ def review_steam_url(record_id: int, request: Request) -> JSONResponse | Redirec
     update_steam_record_review(record_id, review.title, review.body)
     if "application/json" in request.headers.get("accept", ""):
         return JSONResponse({"title": review.title, "body": review.body})
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/steam-urls/{record_id}/share", response_model=None)
+def share_steam_url(record_id: int, request: Request) -> JSONResponse | RedirectResponse:
+    record = get_steam_record(record_id)
+    if not record.video:
+        raise HTTPException(status_code=400, detail="Run this Steam URL before sharing so a video is available.")
+
+    share = share_record_video_to_buffer(record)
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse(share.model_dump(mode="json"))
     return RedirectResponse("/", status_code=303)
 
 
@@ -666,6 +724,9 @@ def render_steam_record_row(record: SteamRecord) -> str:
       <form method="post" action="/steam-urls/{record.id}/review" data-review-form>
         <button class="review-button" type="submit">Review</button>
       </form>
+      <form method="post" action="/steam-urls/{record.id}/share" data-share-form>
+        <button class="share-button" type="submit"{("" if record.video else " disabled")}>Share</button>
+      </form>
       <span class="row-status" data-run-status>{video_button}</span>
       <form method="post" action="/steam-urls/{record.id}/delete">
         <button class="danger" type="submit">Delete</button>
@@ -673,6 +734,149 @@ def render_steam_record_row(record: SteamRecord) -> str:
     </div>
   </td>
 </tr>"""
+
+
+def share_record_video_to_buffer(record: SteamRecord) -> BufferShareResponse:
+    video_url = build_public_video_url_from_field(record.video or "")
+    if not video_url:
+        raise HTTPException(status_code=400, detail="Steam URL has no video to share")
+
+    channels = list_buffer_target_channels()
+    post_text = build_buffer_post_text(record, video_url)
+    posts = [create_buffer_video_post(channel, post_text, video_url) for channel in channels]
+    return BufferShareResponse(video_url=video_url, posts=posts)
+
+
+def build_buffer_post_text(record: SteamRecord, video_url: str) -> str:
+    parts = []
+    if record.title:
+        parts.append(record.title.strip())
+    elif record.name:
+        parts.append(record.name.strip())
+    if record.body:
+        parts.append(record.body.strip())
+    parts.append(video_url)
+    return "\n\n".join(part for part in parts if part)
+
+
+def list_buffer_target_channels() -> list[BufferChannel]:
+    configured_channels = [
+        BufferChannel(id=profile_id, service=service)
+        for service, profile_id in {
+            "tiktok": os.getenv("BUFFER_TIKTOK_PROFILE_ID"),
+            "youtube": os.getenv("BUFFER_YOUTUBE_PROFILE_ID"),
+            "instagram": os.getenv("BUFFER_INSTAGRAM_PROFILE_ID"),
+        }.items()
+        if profile_id
+    ]
+    if not configured_channels:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Buffer profile IDs are not configured. Set at least one of "
+                "BUFFER_TIKTOK_PROFILE_ID, BUFFER_YOUTUBE_PROFILE_ID, or BUFFER_INSTAGRAM_PROFILE_ID."
+            ),
+        )
+    return configured_channels
+
+
+def create_buffer_video_post(channel: BufferChannel, text: str, video_url: str) -> BufferSharePost:
+    title = build_buffer_video_title(text)
+    data = buffer_graphql_request(
+        """
+        mutation CreateScheduledVideoPost($input: CreatePostInput!) {
+          createPost(input: $input) {
+            ... on PostActionSuccess {
+              post {
+                id
+                channelId
+                dueAt
+              }
+            }
+            ... on MutationError {
+              message
+            }
+          }
+        }
+        """,
+        {
+            "input": {
+                "text": text,
+                "channelId": channel.id,
+                "schedulingType": "automatic",
+                "mode": "addToQueue",
+                "metadata": build_buffer_post_metadata(channel.service, title),
+                "assets": [{"video": {"url": video_url, "metadata": {"title": title}}}],
+            }
+        },
+    )
+    result = data.get("createPost")
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="Buffer returned an invalid createPost payload")
+    if result.get("message"):
+        raise HTTPException(status_code=502, detail=f"Buffer could not schedule {channel.service}: {result['message']}")
+
+    post = result.get("post")
+    if not isinstance(post, dict) or not post.get("id"):
+        raise HTTPException(status_code=502, detail=f"Buffer did not return a scheduled post for {channel.service}")
+
+    return BufferSharePost(
+        id=str(post["id"]),
+        channel_id=str(post.get("channelId") or channel.id),
+        channel_name=channel.name,
+        service=channel.service,
+        due_at=post.get("dueAt"),
+    )
+
+
+def build_buffer_video_title(text: str) -> str:
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "Steamboy video")
+    return first_line[:100] or "Steamboy video"
+
+
+def build_buffer_post_metadata(service: str, title: str) -> dict[str, dict[str, object]]:
+    if service == "instagram":
+        return {"instagram": {"type": "reel", "shouldShareToFeed": True}}
+    if service == "youtube":
+        return {"youtube": {"title": title, "privacy": "public", "madeForKids": False}}
+    if service == "tiktok":
+        return {"tiktok": {"isAiGenerated": False}}
+    return {}
+
+
+def buffer_graphql_request(query: str, variables: dict | None = None) -> dict:
+    api_key = os.getenv("BUFFER_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Buffer is not configured. Set BUFFER_API_KEY.")
+
+    try:
+        response = requests.post(
+            BUFFER_API_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"query": query, "variables": variables or {}},
+            timeout=45,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.HTTPError as exc:
+        response_text = exc.response.text[:1000] if exc.response is not None else ""
+        detail = f"Buffer API request failed: {exc}"
+        if response_text:
+            detail = f"{detail}. Response: {response_text}"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Buffer API request failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"Buffer returned invalid JSON: {exc}") from exc
+
+    errors = payload.get("errors")
+    if errors:
+        message = errors[0].get("message") if isinstance(errors, list) and isinstance(errors[0], dict) else repr(errors)
+        raise HTTPException(status_code=502, detail=f"Buffer API error: {message}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Buffer returned an invalid GraphQL payload")
+    return data
 
 
 def render_dashboard_alert(message: str) -> str:
