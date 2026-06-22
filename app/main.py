@@ -41,6 +41,7 @@ class SteamRecord(BaseModel):
     steamurl: str | None = None
     name: str | None = None
     run: datetime | None = None
+    video: str | None = None
 
 
 class SteamVideoRequest(BaseModel):
@@ -79,11 +80,12 @@ class SteamVideoJobResponse(BaseModel):
 
 
 class SteamVideoJob:
-    def __init__(self, job_id: str, steam_url: str, output_filename: str) -> None:
+    def __init__(self, job_id: str, steam_url: str, output_filename: str, record_id: int | None = None) -> None:
         now = datetime.now(UTC)
         self.job_id = job_id
         self.steam_url = steam_url
         self.output_filename = output_filename
+        self.record_id = record_id
         self.status = JobStatus.queued
         self.created_at = now
         self.updated_at = now
@@ -404,7 +406,7 @@ def run_steam_url(record_id: int, background_tasks: BackgroundTasks, request: Re
     validate_steam_url(record.steamurl)
     ensure_ffmpeg()
     run_at = mark_steam_record_run(record_id)
-    job = create_job(record.steamurl, build_output_filename_from_name(record.name) if record.name else None)
+    job = create_job(record.steamurl, build_output_filename_from_name(record.name) if record.name else None, record_id=record.id)
     background_tasks.add_task(process_steam_video_job, job.job_id)
     if "application/json" in request.headers.get("accept", ""):
         return JSONResponse(
@@ -465,16 +467,16 @@ def get_db_connection() -> psycopg.Connection[tuple]:
 
 def list_steam_records() -> list[SteamRecord]:
     with get_db_connection() as connection:
-        rows = connection.execute('SELECT "id", "steamurl", "name", "run" FROM "steam" ORDER BY "id"').fetchall()
-    return [SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3]) for row in rows]
+        rows = connection.execute('SELECT "id", "steamurl", "name", "run", "video" FROM "steam" ORDER BY "id"').fetchall()
+    return [SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3], video=row[4]) for row in rows]
 
 
 def get_steam_record(record_id: int) -> SteamRecord:
     with get_db_connection() as connection:
-        row = connection.execute('SELECT "id", "steamurl", "name", "run" FROM "steam" WHERE "id" = %s', (record_id,)).fetchone()
+        row = connection.execute('SELECT "id", "steamurl", "name", "run", "video" FROM "steam" WHERE "id" = %s', (record_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Steam URL not found")
-    return SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3])
+    return SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3], video=row[4])
 
 
 def mark_steam_record_run(record_id: int) -> datetime:
@@ -486,6 +488,13 @@ def mark_steam_record_run(record_id: int) -> datetime:
     return run_at
 
 
+def update_steam_record_video(record_id: int, filename: str) -> None:
+    with get_db_connection() as connection:
+        result = connection.execute('UPDATE "steam" SET "video" = %s WHERE "id" = %s', (filename, record_id))
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Steam URL not found")
+
+
 def render_steam_record_row(record: SteamRecord) -> str:
     steamurl = record.steamurl or ""
     escaped_url = escape(steamurl, quote=True)
@@ -493,6 +502,13 @@ def render_steam_record_row(record: SteamRecord) -> str:
     display_name = escaped_name or "<em>Unknown game</em>"
     name_cell = f'<a href="{escaped_url}" target="_blank" rel="noreferrer">{display_name}</a>' if steamurl else display_name
     run_at = record.run.isoformat() if record.run else ""
+    video_button = ""
+    if record.video:
+        video_url = build_public_video_url_from_field(record.video)
+        video_button = (
+            f'<a class="video-button" href="{escape(video_url, quote=True)}" '
+            'target="_blank" rel="noreferrer">Video</a>'
+        )
     return f"""<tr>
   <td>{record.id}</td>
   <td>{name_cell}</td>
@@ -502,7 +518,7 @@ def render_steam_record_row(record: SteamRecord) -> str:
       <form method="post" action="/steam-urls/{record.id}/run" data-run-form>
         <button type="submit">Run</button>
       </form>
-      <span class="row-status" data-run-status></span>
+      <span class="row-status" data-run-status>{video_button}</span>
       <form method="post" action="/steam-urls/{record.id}/delete">
         <button class="danger" type="submit">Delete</button>
       </form>
@@ -568,8 +584,13 @@ def normalize_dashboard_steam_url(steamurl: str) -> str:
     return normalized_url
 
 
-def create_job(steam_url: str, output_filename: str | None = None) -> SteamVideoJob:
-    job = SteamVideoJob(job_id=uuid4().hex, steam_url=steam_url, output_filename=output_filename or build_output_filename(steam_url))
+def create_job(steam_url: str, output_filename: str | None = None, record_id: int | None = None) -> SteamVideoJob:
+    job = SteamVideoJob(
+        job_id=uuid4().hex,
+        steam_url=steam_url,
+        output_filename=output_filename or build_output_filename(steam_url),
+        record_id=record_id,
+    )
     with jobs_lock:
         jobs[job.job_id] = job
     return job
@@ -611,6 +632,8 @@ def process_steam_video_job(job_id: str) -> None:
 
     try:
         result = process_steam_video(job.steam_url, job.output_filename)
+        if job.record_id is not None:
+            update_steam_record_video(job.record_id, result.sftp_file.filename)
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else repr(exc.detail)
         update_job(job_id, status=JobStatus.failed, error=detail)
@@ -650,6 +673,16 @@ def build_output_filename_from_name(name: str) -> str:
 
 def build_public_video_url(filename: str) -> str:
     return f"{PUBLIC_VIDEO_BASE_URL}/{filename}"
+
+
+def build_public_video_url_from_field(video: str) -> str:
+    filename = video.strip()
+    if not filename:
+        return ""
+    if filename.lower().endswith(".mp4"):
+        stem = filename[:-4]
+        return build_public_video_url(f"{quote(stem, safe='%')}.mp4")
+    return build_public_video_url(build_output_filename_from_name(filename))
 
 
 def validate_steam_url(url: str) -> None:
