@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from enum import Enum
+from html import escape
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
@@ -16,8 +17,10 @@ from uuid import uuid4
 
 import imageio_ffmpeg
 import paramiko
+import psycopg
 import yt_dlp
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field, HttpUrl
 from yt_dlp.utils import download_range_func
 
@@ -29,6 +32,11 @@ MAX_SEGMENTS = 10
 MAX_MERGED_DURATION_SECONDS = SEGMENT_SECONDS * MAX_SEGMENTS
 
 app = FastAPI(title="Steamboy", version="0.1.0")
+
+
+class SteamRecord(BaseModel):
+    id: int
+    steamurl: str | None = None
 
 
 class SteamVideoRequest(BaseModel):
@@ -80,6 +88,222 @@ jobs: dict[str, SteamVideoJob] = {}
 jobs_lock = Lock()
 
 
+@app.get("/", response_class=HTMLResponse)
+def dashboard() -> HTMLResponse:
+    records = list_steam_records()
+    rows = "\n".join(render_steam_record_row(record) for record in records)
+    if not rows:
+        rows = '<tr><td colspan="3" class="empty">No Steam URLs have been saved yet.</td></tr>'
+
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steamboy Dashboard</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #101827;
+      color: #f8fafc;
+    }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(59, 130, 246, 0.22), transparent 34rem),
+        linear-gradient(135deg, #0f172a 0%, #111827 100%);
+    }}
+    main {{
+      width: min(980px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0;
+    }}
+    header {{
+      margin-bottom: 28px;
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: clamp(2rem, 5vw, 3.8rem);
+      letter-spacing: -0.06em;
+    }}
+    p {{
+      color: #cbd5e1;
+      margin: 0;
+      line-height: 1.6;
+    }}
+    section {{
+      background: rgba(15, 23, 42, 0.78);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 24px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      padding: 24px;
+      margin-top: 20px;
+      backdrop-filter: blur(16px);
+    }}
+    label {{
+      display: block;
+      color: #e2e8f0;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }}
+    .add-form {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: end;
+    }}
+    input[type="url"], input[type="text"] {{
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 14px;
+      color: #f8fafc;
+      background: rgba(15, 23, 42, 0.95);
+      padding: 13px 14px;
+      font: inherit;
+      outline: none;
+    }}
+    input:focus {{
+      border-color: #60a5fa;
+      box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.16);
+    }}
+    button {{
+      border: 0;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      color: white;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 800;
+      padding: 13px 18px;
+      white-space: nowrap;
+    }}
+    button.secondary {{
+      background: rgba(30, 41, 59, 0.95);
+      border: 1px solid rgba(148, 163, 184, 0.35);
+    }}
+    button.danger {{
+      background: #be123c;
+    }}
+    table {{
+      border-collapse: collapse;
+      width: 100%;
+    }}
+    th, td {{
+      border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      padding: 14px 10px;
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      color: #93c5fd;
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+    a {{
+      color: #93c5fd;
+      overflow-wrap: anywhere;
+    }}
+    .edit-form {{
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      gap: 10px;
+    }}
+    .actions {{
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }}
+    .empty {{
+      color: #cbd5e1;
+      text-align: center;
+    }}
+    @media (max-width: 720px) {{
+      .add-form, .edit-form {{
+        grid-template-columns: 1fr;
+      }}
+      .actions {{
+        justify-content: flex-start;
+      }}
+      th:nth-child(1), td:nth-child(1) {{
+        display: none;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Steamboy Dashboard</h1>
+      <p>Add and edit Steam store URLs saved in your Neon Postgres <code>steam</code> table.</p>
+    </header>
+
+    <section aria-labelledby="add-title">
+      <h2 id="add-title">Add Steam URL</h2>
+      <form class="add-form" method="post" action="/steam-urls">
+        <div>
+          <label for="steamurl">Steam URL</label>
+          <input id="steamurl" name="steamurl" type="url" placeholder="https://store.steampowered.com/app/730/CounterStrike_2/" required>
+        </div>
+        <button type="submit">Save URL</button>
+      </form>
+    </section>
+
+    <section aria-labelledby="saved-title">
+      <h2 id="saved-title">Saved Steam URLs</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Steam URL</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows}
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>"""
+    )
+
+
+@app.post("/steam-urls")
+def create_steam_url(steamurl: Annotated[str, Form()]) -> RedirectResponse:
+    normalized_url = normalize_dashboard_steam_url(steamurl)
+    with get_db_connection() as connection:
+        connection.execute('INSERT INTO "steam" ("steamurl") VALUES (%s)', (normalized_url,))
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/steam-urls/{record_id}/edit")
+def update_steam_url(record_id: int, steamurl: Annotated[str, Form()]) -> RedirectResponse:
+    normalized_url = normalize_dashboard_steam_url(steamurl)
+    with get_db_connection() as connection:
+        result = connection.execute(
+            'UPDATE "steam" SET "steamurl" = %s WHERE "id" = %s',
+            (normalized_url, record_id),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Steam URL not found")
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/steam-urls/{record_id}/delete")
+def delete_steam_url(record_id: int) -> RedirectResponse:
+    with get_db_connection() as connection:
+        result = connection.execute('DELETE FROM "steam" WHERE "id" = %s', (record_id,))
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Steam URL not found")
+    return RedirectResponse("/", status_code=303)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -105,6 +329,49 @@ def get_steam_video_job(job_id: str) -> SteamVideoJobResponse:
 @app.post("/steam/video-to-drive", response_model=SteamVideoJobResponse, status_code=202, deprecated=True)
 def steam_video_to_drive(payload: SteamVideoRequest, background_tasks: BackgroundTasks) -> SteamVideoJobResponse:
     return steam_video_to_sftp(payload, background_tasks)
+
+
+def get_db_connection() -> psycopg.Connection[tuple]:
+    db_url = os.getenv("NEON_DB_URL")
+    if not db_url:
+        raise HTTPException(status_code=500, detail="Database is not configured. Set NEON_DB_URL.")
+    return psycopg.connect(db_url)
+
+
+def list_steam_records() -> list[SteamRecord]:
+    with get_db_connection() as connection:
+        rows = connection.execute('SELECT "id", "steamurl" FROM "steam" ORDER BY "id"').fetchall()
+    return [SteamRecord(id=row[0], steamurl=row[1]) for row in rows]
+
+
+def render_steam_record_row(record: SteamRecord) -> str:
+    steamurl = record.steamurl or ""
+    escaped_url = escape(steamurl, quote=True)
+    display_url = escaped_url or "<em>Empty URL</em>"
+    link = f'<a href="{escaped_url}" target="_blank" rel="noreferrer">{display_url}</a>' if steamurl else display_url
+    return f"""<tr>
+  <td>{record.id}</td>
+  <td>
+    <form class="edit-form" method="post" action="/steam-urls/{record.id}/edit">
+      <input name="steamurl" type="url" value="{escaped_url}" required>
+      <button class="secondary" type="submit">Update</button>
+    </form>
+    <p>{link}</p>
+  </td>
+  <td>
+    <form class="actions" method="post" action="/steam-urls/{record.id}/delete">
+      <button class="danger" type="submit">Delete</button>
+    </form>
+  </td>
+</tr>"""
+
+
+def normalize_dashboard_steam_url(steamurl: str) -> str:
+    normalized_url = steamurl.strip()
+    if not normalized_url:
+        raise HTTPException(status_code=400, detail="Steam URL is required")
+    validate_steam_url(normalized_url)
+    return normalized_url
 
 
 def create_job(steam_url: str) -> SteamVideoJob:
