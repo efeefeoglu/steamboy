@@ -2,6 +2,8 @@
 
 API service that downloads up to the first 40 seconds of a trailer video from a Steam game page, converts it to a vertical 1080x1920 (9:16) video, and uploads the result over SFTP.
 
+The root URL also serves a small dashboard for adding, editing, and deleting Steam store URLs saved in a Neon Postgres database.
+
 ## Requirements
 
 - Python 3.11+
@@ -14,6 +16,7 @@ Set the following environment variables for SFTP authentication:
 
 - `SFTP_USER`: SFTP username
 - `SFTP_PASS`: SFTP password
+- `NEON_DB_URL`: Neon Postgres connection URL used by the dashboard
 
 Optional:
 
@@ -28,6 +31,29 @@ uvicorn app.main:app --reload
 ```
 
 ## Endpoint
+
+### Dashboard
+
+`GET /`
+
+Opens a dashboard backed by the Neon Postgres table below:
+
+```sql
+CREATE TABLE "steam" (
+  "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "steam_id_seq"),
+  "steamurl" text
+);
+```
+
+The dashboard supports:
+
+- Adding a Steam store URL
+- Editing existing Steam store URLs
+- Deleting saved Steam store URLs
+
+If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error.
+
+### Video processing API
 
 `POST /steam/video-to-sftp`
 
