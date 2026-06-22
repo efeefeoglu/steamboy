@@ -214,7 +214,7 @@ def dashboard() -> HTMLResponse:
     .video-button {{
       align-items: center;
       background: #0f766e;
-      border-radius: 999px;
+      border-radius: 14px;
       color: white;
       display: inline-flex;
       font-weight: 800;
