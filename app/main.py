@@ -189,10 +189,6 @@ def dashboard() -> HTMLResponse:
       padding: 13px 18px;
       white-space: nowrap;
     }}
-    button.secondary {{
-      background: rgba(30, 41, 59, 0.95);
-      border: 1px solid rgba(148, 163, 184, 0.35);
-    }}
     button.danger {{
       background: #be123c;
     }}
@@ -216,11 +212,6 @@ def dashboard() -> HTMLResponse:
       color: #93c5fd;
       overflow-wrap: anywhere;
     }}
-    .edit-form {{
-      display: grid;
-      grid-template-columns: minmax(220px, 1fr) auto;
-      gap: 10px;
-    }}
     .actions {{
       display: flex;
       gap: 8px;
@@ -239,7 +230,7 @@ def dashboard() -> HTMLResponse:
       padding: 14px 16px;
     }}
     @media (max-width: 720px) {{
-      .add-form, .edit-form {{
+      .add-form {{
         grid-template-columns: 1fr;
       }}
       .actions {{
@@ -255,7 +246,7 @@ def dashboard() -> HTMLResponse:
   <main>
     <header>
       <h1>Steamboy Dashboard</h1>
-      <p>Add and edit Steam store URLs saved in your Neon Postgres <code>steam</code> table.</p>
+      <p>Add and delete Steam store URLs saved in your Neon Postgres <code>steam</code> table.</p>
     </header>
     {dashboard_message}
 
@@ -296,19 +287,6 @@ def create_steam_url(steamurl: Annotated[str, Form()]) -> RedirectResponse:
     normalized_url = normalize_dashboard_steam_url(steamurl)
     with get_db_connection() as connection:
         connection.execute('INSERT INTO "steam" ("steamurl") VALUES (%s)', (normalized_url,))
-    return RedirectResponse("/", status_code=303)
-
-
-@app.post("/steam-urls/{record_id}/edit")
-def update_steam_url(record_id: int, steamurl: Annotated[str, Form()]) -> RedirectResponse:
-    normalized_url = normalize_dashboard_steam_url(steamurl)
-    with get_db_connection() as connection:
-        result = connection.execute(
-            'UPDATE "steam" SET "steamurl" = %s WHERE "id" = %s',
-            (normalized_url, record_id),
-        )
-        if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Steam URL not found")
     return RedirectResponse("/", status_code=303)
 
 
@@ -368,13 +346,7 @@ def render_steam_record_row(record: SteamRecord) -> str:
     link = f'<a href="{escaped_url}" target="_blank" rel="noreferrer">{display_url}</a>' if steamurl else display_url
     return f"""<tr>
   <td>{record.id}</td>
-  <td>
-    <form class="edit-form" method="post" action="/steam-urls/{record.id}/edit">
-      <input name="steamurl" type="url" value="{escaped_url}" required>
-      <button class="secondary" type="submit">Update</button>
-    </form>
-    <p>{link}</p>
-  </td>
+  <td>{link}</td>
   <td>
     <form class="actions" method="post" action="/steam-urls/{record.id}/delete">
       <button class="danger" type="submit">Delete</button>
