@@ -51,6 +51,8 @@ The dashboard supports:
 - Editing existing Steam store URLs
 - Deleting saved Steam store URLs
 
+If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error.
+
 ### Video processing API
 
 `POST /steam/video-to-sftp`

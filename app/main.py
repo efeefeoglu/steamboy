@@ -90,7 +90,15 @@ jobs_lock = Lock()
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard() -> HTMLResponse:
-    records = list_steam_records()
+    records: list[SteamRecord] = []
+    dashboard_message = ""
+    try:
+        records = list_steam_records()
+    except HTTPException as exc:
+        dashboard_message = render_dashboard_alert(str(exc.detail))
+    except psycopg.Error as exc:
+        dashboard_message = render_dashboard_alert(f"Could not load Steam URLs from Neon DB: {exc}")
+
     rows = "\n".join(render_steam_record_row(record) for record in records)
     if not rows:
         rows = '<tr><td colspan="3" class="empty">No Steam URLs have been saved yet.</td></tr>'
@@ -222,6 +230,14 @@ def dashboard() -> HTMLResponse:
       color: #cbd5e1;
       text-align: center;
     }}
+    .alert {{
+      background: rgba(202, 138, 4, 0.14);
+      border: 1px solid rgba(250, 204, 21, 0.38);
+      border-radius: 18px;
+      color: #fef3c7;
+      margin: 0 0 20px;
+      padding: 14px 16px;
+    }}
     @media (max-width: 720px) {{
       .add-form, .edit-form {{
         grid-template-columns: 1fr;
@@ -241,6 +257,7 @@ def dashboard() -> HTMLResponse:
       <h1>Steamboy Dashboard</h1>
       <p>Add and edit Steam store URLs saved in your Neon Postgres <code>steam</code> table.</p>
     </header>
+    {dashboard_message}
 
     <section aria-labelledby="add-title">
       <h2 id="add-title">Add Steam URL</h2>
@@ -364,6 +381,13 @@ def render_steam_record_row(record: SteamRecord) -> str:
     </form>
   </td>
 </tr>"""
+
+
+def render_dashboard_alert(message: str) -> str:
+    return f"""<div class="alert" role="alert">
+  <strong>Dashboard is available, but the database is not connected.</strong>
+  <p>{escape(message)}</p>
+</div>"""
 
 
 def normalize_dashboard_steam_url(steamurl: str) -> str:
