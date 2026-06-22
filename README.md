@@ -2,7 +2,7 @@
 
 API service that downloads up to the first 40 seconds of a trailer video from a Steam game page, converts it to a vertical 1080x1920 (9:16) video, and uploads the result over SFTP.
 
-The root URL also serves a small dashboard for adding and deleting Steam store URLs saved in a Neon Postgres database.
+The root URL also serves a small dashboard for adding, running, and deleting Steam store URLs saved in a Neon Postgres database.
 
 ## Requirements
 
@@ -48,7 +48,8 @@ CREATE TABLE "steam" (
 
 The dashboard supports:
 
-- Adding a Steam store URL and automatically storing the game title from the page
+- Adding a Steam store URL
+- Running a saved Steam store URL as a background SFTP upload job
 - Deleting saved Steam store URLs
 
 If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error.
@@ -82,6 +83,6 @@ Poll `GET /steam/video-to-sftp/jobs/{job_id}` to check the job. A completed job 
 
 Job data is stored in process memory. Restarting the API process clears queued, running, and completed jobs.
 
-The service limits the merged download to 10 packages of 4 seconds each (40 seconds total). The converted video overwrites `efeefeoglu.com/steamboy/video.mp4` on `sftp://vps38164.dreamhostps.com`.
+The service limits the merged download to 10 packages of 4 seconds each (40 seconds total). The converted video is uploaded to `sftp://vps38164.dreamhostps.com/efeefeoglu.com/steamboy/` using the Steam app name from the URL as a URL-encoded `.mp4` filename, for example `CounterStrike_2.mp4`.
 
 For backward compatibility, `POST /steam/video-to-drive` is still available as a deprecated alias that creates the same background SFTP upload job.

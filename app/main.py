@@ -13,7 +13,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 import imageio_ffmpeg
@@ -28,7 +28,6 @@ from yt_dlp.utils import download_range_func
 
 SFTP_HOST = "vps38164.dreamhostps.com"
 SFTP_FOLDER = "efeefeoglu.com/steamboy"
-SFTP_FILENAME = "video.mp4"
 SEGMENT_SECONDS = 4
 MAX_SEGMENTS = 10
 MAX_MERGED_DURATION_SECONDS = SEGMENT_SECONDS * MAX_SEGMENTS
@@ -76,10 +75,11 @@ class SteamVideoJobResponse(BaseModel):
 
 
 class SteamVideoJob:
-    def __init__(self, job_id: str, steam_url: str) -> None:
+    def __init__(self, job_id: str, steam_url: str, output_filename: str) -> None:
         now = datetime.now(UTC)
         self.job_id = job_id
         self.steam_url = steam_url
+        self.output_filename = output_filename
         self.status = JobStatus.queued
         self.created_at = now
         self.updated_at = now
@@ -249,7 +249,7 @@ def dashboard() -> HTMLResponse:
   <main>
     <header>
       <h1>Steamboy Dashboard</h1>
-      <p>Add and delete Steam store URLs saved in your Neon Postgres <code>steam</code> table.</p>
+      <p>Add, run, and delete Steam store URLs saved in your Neon Postgres <code>steam</code> table.</p>
     </header>
     {dashboard_message}
 
@@ -296,6 +296,19 @@ def create_steam_url(steamurl: Annotated[str, Form()]) -> RedirectResponse:
             (normalized_url, game_title),
         )
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/steam-urls/{record_id}/run")
+def run_steam_url(record_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
+    record = get_steam_record(record_id)
+    if not record.steamurl:
+        raise HTTPException(status_code=400, detail="Steam URL is empty")
+
+    validate_steam_url(record.steamurl)
+    ensure_ffmpeg()
+    job = create_job(record.steamurl)
+    background_tasks.add_task(process_steam_video_job, job.job_id)
+    return RedirectResponse(f"/steam/video-to-sftp/jobs/{job.job_id}", status_code=303)
 
 
 @app.post("/steam-urls/{record_id}/delete")
@@ -347,6 +360,14 @@ def list_steam_records() -> list[SteamRecord]:
     return [SteamRecord(id=row[0], steamurl=row[1], name=row[2]) for row in rows]
 
 
+def get_steam_record(record_id: int) -> SteamRecord:
+    with get_db_connection() as connection:
+        row = connection.execute('SELECT "id", "steamurl" FROM "steam" WHERE "id" = %s', (record_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Steam URL not found")
+    return SteamRecord(id=row[0], steamurl=row[1])
+
+
 def render_steam_record_row(record: SteamRecord) -> str:
     steamurl = record.steamurl or ""
     escaped_url = escape(steamurl, quote=True)
@@ -359,9 +380,14 @@ def render_steam_record_row(record: SteamRecord) -> str:
   <td>{display_name}</td>
   <td>{link}</td>
   <td>
-    <form class="actions" method="post" action="/steam-urls/{record.id}/delete">
-      <button class="danger" type="submit">Delete</button>
-    </form>
+    <div class="actions">
+      <form method="post" action="/steam-urls/{record.id}/run">
+        <button type="submit">Run</button>
+      </form>
+      <form method="post" action="/steam-urls/{record.id}/delete">
+        <button class="danger" type="submit">Delete</button>
+      </form>
+    </div>
   </td>
 </tr>"""
 
@@ -424,7 +450,7 @@ def normalize_dashboard_steam_url(steamurl: str) -> str:
 
 
 def create_job(steam_url: str) -> SteamVideoJob:
-    job = SteamVideoJob(job_id=uuid4().hex, steam_url=steam_url)
+    job = SteamVideoJob(job_id=uuid4().hex, steam_url=steam_url, output_filename=build_output_filename(steam_url))
     with jobs_lock:
         jobs[job.job_id] = job
     return job
@@ -464,7 +490,7 @@ def process_steam_video_job(job_id: str) -> None:
     update_job(job_id, status=JobStatus.running, error=None)
 
     try:
-        result = process_steam_video(job.steam_url)
+        result = process_steam_video(job.steam_url, job.output_filename)
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else repr(exc.detail)
         update_job(job_id, status=JobStatus.failed, error=detail)
@@ -476,19 +502,26 @@ def process_steam_video_job(job_id: str) -> None:
     update_job(job_id, status=JobStatus.completed, result=result)
 
 
-def process_steam_video(steam_url: str) -> SteamVideoResponse:
+def process_steam_video(steam_url: str, output_filename: str) -> SteamVideoResponse:
     work_root = Path(os.getenv("WORK_DIR", "/tmp/steamboy"))
     work_root.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="steam-video-", dir=work_root) as tmp:
         tmp_dir = Path(tmp)
         source_path = download_steam_video(steam_url, tmp_dir)
-        output_path = tmp_dir / SFTP_FILENAME
+        output_path = tmp_dir / output_filename
 
         convert_to_vertical(source_path, output_path)
-        sftp_file = upload_to_sftp(output_path)
+        sftp_file = upload_to_sftp(output_path, output_filename)
 
     return SteamVideoResponse(source_video_url=steam_url, sftp_file=sftp_file)
+
+
+def build_output_filename(steam_url: str) -> str:
+    parsed = urlparse(steam_url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    raw_name = path_parts[2] if len(path_parts) >= 3 else path_parts[1]
+    return f"{quote(raw_name, safe='')}.mp4"
 
 
 def validate_steam_url(url: str) -> None:
@@ -619,13 +652,13 @@ def convert_to_vertical(source: Path, destination: Path) -> None:
         raise HTTPException(status_code=500, detail=f"ffmpeg failed: {completed.stderr[-1000:]}")
 
 
-def upload_to_sftp(file_path: Path) -> SftpUploadResponse:
+def upload_to_sftp(file_path: Path, filename: str) -> SftpUploadResponse:
     username = os.getenv("SFTP_USER")
     password = os.getenv("SFTP_PASS")
     if not username or not password:
         raise HTTPException(status_code=500, detail="SFTP credentials are not configured. Set SFTP_USER and SFTP_PASS.")
 
-    remote_path = f"{SFTP_FOLDER}/{SFTP_FILENAME}"
+    remote_path = f"{SFTP_FOLDER}/{filename}"
     try:
         transport = paramiko.Transport((SFTP_HOST, 22))
         transport.connect(username=username, password=password)
@@ -640,7 +673,7 @@ def upload_to_sftp(file_path: Path) -> SftpUploadResponse:
         if "transport" in locals():
             transport.close()
 
-    return SftpUploadResponse(host=SFTP_HOST, path=remote_path, filename=SFTP_FILENAME)
+    return SftpUploadResponse(host=SFTP_HOST, path=remote_path, filename=filename)
 
 
 def ensure_remote_directory(sftp: paramiko.SFTPClient, remote_directory: str) -> None:
