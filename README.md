@@ -41,7 +41,8 @@ Opens a dashboard backed by the Neon Postgres table below:
 ```sql
 CREATE TABLE "steam" (
   "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "steam_id_seq"),
-  "steamurl" text
+  "steamurl" text,
+  "name" text
 );
 ```
 
