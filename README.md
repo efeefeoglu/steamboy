@@ -43,7 +43,8 @@ CREATE TABLE "steam" (
   "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "steam_id_seq"),
   "steamurl" text,
   "name" text,
-  "run" timestamptz
+  "run" timestamptz,
+  "video" text
 );
 ```
 
@@ -51,7 +52,8 @@ The dashboard supports:
 
 - Adding a Steam store URL
 - Running a saved Steam store URL as a background SFTP upload job without leaving the dashboard
-- Showing the latest run time as a relative timestamp and revealing a Video button when the upload finishes
+- Saving the uploaded SFTP filename in the `video` field when a dashboard run finishes
+- Showing the latest run time as a relative timestamp and showing a Video button when the `video` field has a value
 - Deleting saved Steam store URLs
 
 If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error.
@@ -85,6 +87,6 @@ Poll `GET /steam/video-to-sftp/jobs/{job_id}` to check the job. A completed job 
 
 Job data is stored in process memory. Restarting the API process clears queued, running, and completed jobs.
 
-The service limits the merged download to 10 packages of 4 seconds each (40 seconds total). The converted video is uploaded to `sftp://vps38164.dreamhostps.com/efeefeoglu.com/steamboy/` using the Steam app name from the URL as a URL-encoded `.mp4` filename, for example `CounterStrike_2.mp4`.
+The service limits the merged download to 10 packages of 4 seconds each (40 seconds total). The converted video is uploaded to `sftp://vps38164.dreamhostps.com/efeefeoglu.com/steamboy/` using the Steam app name from the URL as a URL-encoded `.mp4` filename, for example `CounterStrike_2.mp4`. Dashboard runs store that filename in the row's `video` field, and the dashboard links it as `https://efeefeoglu.com/steamboy/[encoded name].mp4`.
 
 For backward compatibility, `POST /steam/video-to-drive` is still available as a deprecated alias that creates the same background SFTP upload job.
