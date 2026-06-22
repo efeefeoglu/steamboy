@@ -41,13 +41,14 @@ Opens a dashboard backed by the Neon Postgres table below:
 ```sql
 CREATE TABLE "steam" (
   "id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "steam_id_seq"),
-  "steamurl" text
+  "steamurl" text,
+  "name" text
 );
 ```
 
 The dashboard supports:
 
-- Adding a Steam store URL
+- Adding a Steam store URL and automatically storing the game title from the page
 - Deleting saved Steam store URLs
 
 If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error.
