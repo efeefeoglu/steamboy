@@ -87,6 +87,6 @@ Poll `GET /steam/video-to-sftp/jobs/{job_id}` to check the job. A completed job 
 
 Job data is stored in process memory. Restarting the API process clears queued, running, and completed jobs.
 
-The service limits the merged download to 10 packages of 4 seconds each (40 seconds total). The converted video is uploaded to `sftp://vps38164.dreamhostps.com/efeefeoglu.com/steamboy/` using the Steam app name from the URL as a URL-encoded `.mp4` filename, for example `CounterStrike_2.mp4`. Dashboard runs store that filename in the row's `video` field, and the dashboard links it as `https://efeefeoglu.com/steamboy/[encoded name].mp4`.
+The service limits the merged download to 10 packages of 4 seconds each (40 seconds total). The converted video is uploaded to `sftp://vps38164.dreamhostps.com/efeefeoglu.com/steamboy/` using the Steam app name from the URL as a sanitized `.mp4` filename: whitespace becomes dashes and unsupported characters are removed, for example `Counter-Strike-2.mp4`. Dashboard runs store that filename in the row's `video` field, and the dashboard links it as `https://efeefeoglu.com/steamboy/[sanitized-name].mp4`.
 
 For backward compatibility, `POST /steam/video-to-drive` is still available as a deprecated alias that creates the same background SFTP upload job.
