@@ -839,7 +839,7 @@ def build_buffer_post_metadata(service: str, title: str) -> dict[str, dict[str, 
     if service == "instagram":
         return {"instagram": {"type": "reel", "shouldShareToFeed": True}}
     if service == "youtube":
-        return {"youtube": {"title": title, "privacy": "public", "madeForKids": False}}
+        return {"youtube": {"title": title, "privacy": "public", "categoryId": "20", "madeForKids": False}}
     if service == "tiktok":
         return {"tiktok": {"isAiGenerated": False}}
     return {}
