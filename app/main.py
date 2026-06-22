@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from enum import Enum
 from html import escape
+from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
@@ -18,6 +19,7 @@ from uuid import uuid4
 import imageio_ffmpeg
 import paramiko
 import psycopg
+import requests
 import yt_dlp
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -37,6 +39,7 @@ app = FastAPI(title="Steamboy", version="0.1.0")
 class SteamRecord(BaseModel):
     id: int
     steamurl: str | None = None
+    name: str | None = None
 
 
 class SteamVideoRequest(BaseModel):
@@ -101,7 +104,7 @@ def dashboard() -> HTMLResponse:
 
     rows = "\n".join(render_steam_record_row(record) for record in records)
     if not rows:
-        rows = '<tr><td colspan="3" class="empty">No Steam URLs have been saved yet.</td></tr>'
+        rows = '<tr><td colspan="4" class="empty">No Steam URLs have been saved yet.</td></tr>'
 
     return HTMLResponse(
         f"""<!doctype html>
@@ -267,6 +270,7 @@ def dashboard() -> HTMLResponse:
         <thead>
           <tr>
             <th>ID</th>
+            <th>Name</th>
             <th>Steam URL</th>
             <th>Actions</th>
           </tr>
@@ -285,8 +289,12 @@ def dashboard() -> HTMLResponse:
 @app.post("/steam-urls")
 def create_steam_url(steamurl: Annotated[str, Form()]) -> RedirectResponse:
     normalized_url = normalize_dashboard_steam_url(steamurl)
+    game_title = fetch_steam_game_title(normalized_url)
     with get_db_connection() as connection:
-        connection.execute('INSERT INTO "steam" ("steamurl") VALUES (%s)', (normalized_url,))
+        connection.execute(
+            'INSERT INTO "steam" ("steamurl", "name") VALUES (%s, %s)',
+            (normalized_url, game_title),
+        )
     return RedirectResponse("/", status_code=303)
 
 
@@ -335,17 +343,20 @@ def get_db_connection() -> psycopg.Connection[tuple]:
 
 def list_steam_records() -> list[SteamRecord]:
     with get_db_connection() as connection:
-        rows = connection.execute('SELECT "id", "steamurl" FROM "steam" ORDER BY "id"').fetchall()
-    return [SteamRecord(id=row[0], steamurl=row[1]) for row in rows]
+        rows = connection.execute('SELECT "id", "steamurl", "name" FROM "steam" ORDER BY "id"').fetchall()
+    return [SteamRecord(id=row[0], steamurl=row[1], name=row[2]) for row in rows]
 
 
 def render_steam_record_row(record: SteamRecord) -> str:
     steamurl = record.steamurl or ""
     escaped_url = escape(steamurl, quote=True)
+    escaped_name = escape(record.name or "", quote=True)
+    display_name = escaped_name or "<em>Unknown game</em>"
     display_url = escaped_url or "<em>Empty URL</em>"
     link = f'<a href="{escaped_url}" target="_blank" rel="noreferrer">{display_url}</a>' if steamurl else display_url
     return f"""<tr>
   <td>{record.id}</td>
+  <td>{display_name}</td>
   <td>{link}</td>
   <td>
     <form class="actions" method="post" action="/steam-urls/{record.id}/delete">
@@ -360,6 +371,48 @@ def render_dashboard_alert(message: str) -> str:
   <strong>Dashboard is available, but the database is not connected.</strong>
   <p>{escape(message)}</p>
 </div>"""
+
+
+class SteamTitleParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_app_name = False
+        self.title: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "div":
+            return
+        attributes = dict(attrs)
+        if attributes.get("id") == "appHubAppName":
+            self._in_app_name = True
+
+    def handle_data(self, data: str) -> None:
+        if self._in_app_name and self.title is None:
+            title = data.strip()
+            if title:
+                self.title = title
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in_app_name and tag == "div":
+            self._in_app_name = False
+
+
+def fetch_steam_game_title(steamurl: str) -> str:
+    try:
+        response = requests.get(
+            steamurl,
+            headers={"User-Agent": "Steamboy/0.1 (+https://store.steampowered.com/)"},
+            timeout=15,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=400, detail=f"Could not load Steam store page: {exc}") from exc
+
+    parser = SteamTitleParser()
+    parser.feed(response.text)
+    if not parser.title:
+        raise HTTPException(status_code=400, detail="Could not find Steam game title on store page")
+    return parser.title
 
 
 def normalize_dashboard_steam_url(steamurl: str) -> str:
