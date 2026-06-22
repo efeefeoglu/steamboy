@@ -17,11 +17,13 @@ Set the following environment variables for SFTP authentication:
 - `SFTP_USER`: SFTP username
 - `SFTP_PASS`: SFTP password
 - `NEON_DB_URL`: Neon Postgres connection URL used by the dashboard
+- `OPENAI_API_KEY`: API key used by the Review button to generate social posts
 
 Optional:
 
 - `WORK_DIR`: temporary workspace path (default: `/tmp/steamboy`)
 - `FFMPEG_BINARY`: optional path to an ffmpeg executable; if unset, the service uses system `ffmpeg` first and then falls back to `imageio-ffmpeg`
+- `OPENAI_MODEL`: optional model for review generation (default: `gpt-4.1-mini`)
 
 ## Run locally
 
@@ -44,7 +46,9 @@ CREATE TABLE "steam" (
   "steamurl" text,
   "name" text,
   "run" timestamptz,
-  "video" text
+  "video" text,
+  "title" text,
+  "body" text
 );
 ```
 
@@ -52,11 +56,12 @@ The dashboard supports:
 
 - Adding a Steam store URL
 - Running a saved Steam store URL as a background SFTP upload job without leaving the dashboard
+- Generating and saving a short social review post from a saved Steam store URL with `title` and `body` fields
 - Saving the uploaded SFTP filename in the `video` field when a dashboard run finishes
 - Showing the latest run time as a relative timestamp and showing a Video button when the `video` field has a value
 - Deleting saved Steam store URLs
 
-If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error.
+If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error. The Review button sends the Steam URL to the configured OpenAI model with the prompt: `Write a short casual social media reaction/review post with: a short title, a post body.`
 
 ### Video processing API
 

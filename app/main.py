@@ -33,6 +33,11 @@ PUBLIC_VIDEO_BASE_URL = "https://efeefeoglu.com/steamboy"
 SEGMENT_SECONDS = 4
 MAX_SEGMENTS = 10
 MAX_MERGED_DURATION_SECONDS = SEGMENT_SECONDS * MAX_SEGMENTS
+REVIEW_PROMPT = (
+    "Write a short casual social media reaction/review post with: "
+    "a short title, a post body."
+)
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 
 app = FastAPI(title="Steamboy", version="0.1.0")
 
@@ -43,6 +48,8 @@ class SteamRecord(BaseModel):
     name: str | None = None
     run: datetime | None = None
     video: str | None = None
+    title: str | None = None
+    body: str | None = None
 
 
 class SteamVideoRequest(BaseModel):
@@ -211,6 +218,9 @@ def dashboard() -> HTMLResponse:
       font-size: 0.92rem;
       min-width: 5rem;
     }}
+    .review-button {{
+      background: #9333ea;
+    }}
     .video-button {{
       align-items: center;
       background: #0f766e;
@@ -220,6 +230,17 @@ def dashboard() -> HTMLResponse:
       font-weight: 800;
       padding: 13px 18px;
       text-decoration: none;
+    }}
+    .review-content {{
+      color: #cbd5e1;
+      font-size: 0.92rem;
+      margin-top: 8px;
+      max-width: 26rem;
+    }}
+    .review-content strong {{
+      color: #f8fafc;
+      display: block;
+      margin-bottom: 2px;
     }}
     .error-text {{
       color: #fca5a5;
@@ -378,6 +399,38 @@ def dashboard() -> HTMLResponse:
       }});
     }});
 
+
+    document.querySelectorAll("[data-review-form]").forEach((form) => {{
+      form.addEventListener("submit", async (event) => {{
+        event.preventDefault();
+        const row = form.closest("tr");
+        const button = form.querySelector("button");
+        const status = row.querySelector("[data-run-status]");
+        const review = row.querySelector("[data-review-content]");
+
+        button.disabled = true;
+        status.textContent = "Reviewing…";
+        try {{
+          const response = await fetch(form.action, {{ method: "POST", headers: {{ Accept: "application/json" }} }});
+          if (!response.ok) throw new Error(await response.text() || "Review failed");
+          const data = await response.json();
+          review.innerHTML = `<strong>${{escapeHtml(data.title || "Untitled")}}</strong><span>${{escapeHtml(data.body || "")}}</span>`;
+          status.textContent = "Review saved";
+        }} catch (error) {{
+          status.innerHTML = `<span class="error-text">${{escapeHtml(error.message)}}</span>`;
+        }} finally {{
+          button.disabled = false;
+        }}
+      }});
+    }});
+
+    const escapeHtml = (value) => String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+
     refreshRunTimes();
     setInterval(refreshRunTimes, 10000);
   </script>
@@ -420,6 +473,20 @@ def run_steam_url(record_id: int, background_tasks: BackgroundTasks, request: Re
             },
             status_code=202,
         )
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/steam-urls/{record_id}/review", response_model=None)
+def review_steam_url(record_id: int, request: Request) -> JSONResponse | RedirectResponse:
+    record = get_steam_record(record_id)
+    if not record.steamurl:
+        raise HTTPException(status_code=400, detail="Steam URL is empty")
+
+    validate_steam_url(record.steamurl)
+    review = generate_review(record.steamurl)
+    update_steam_record_review(record_id, review.title, review.body)
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"title": review.title, "body": review.body})
     return RedirectResponse("/", status_code=303)
 
 
@@ -468,16 +535,19 @@ def get_db_connection() -> psycopg.Connection[tuple]:
 
 def list_steam_records() -> list[SteamRecord]:
     with get_db_connection() as connection:
-        rows = connection.execute('SELECT "id", "steamurl", "name", "run", "video" FROM "steam" ORDER BY "id"').fetchall()
-    return [SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3], video=row[4]) for row in rows]
+        rows = connection.execute('SELECT "id", "steamurl", "name", "run", "video", "title", "body" FROM "steam" ORDER BY "id"').fetchall()
+    return [
+        SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3], video=row[4], title=row[5], body=row[6])
+        for row in rows
+    ]
 
 
 def get_steam_record(record_id: int) -> SteamRecord:
     with get_db_connection() as connection:
-        row = connection.execute('SELECT "id", "steamurl", "name", "run", "video" FROM "steam" WHERE "id" = %s', (record_id,)).fetchone()
+        row = connection.execute('SELECT "id", "steamurl", "name", "run", "video", "title", "body" FROM "steam" WHERE "id" = %s', (record_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Steam URL not found")
-    return SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3], video=row[4])
+    return SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3], video=row[4], title=row[5], body=row[6])
 
 
 def mark_steam_record_run(record_id: int) -> datetime:
@@ -496,6 +566,16 @@ def update_steam_record_video(record_id: int, filename: str) -> None:
             raise HTTPException(status_code=404, detail="Steam URL not found")
 
 
+def update_steam_record_review(record_id: int, title: str, body: str) -> None:
+    with get_db_connection() as connection:
+        result = connection.execute(
+            'UPDATE "steam" SET "title" = %s, "body" = %s WHERE "id" = %s',
+            (title, body, record_id),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Steam URL not found")
+
+
 def render_steam_record_row(record: SteamRecord) -> str:
     steamurl = record.steamurl or ""
     escaped_url = escape(steamurl, quote=True)
@@ -504,6 +584,13 @@ def render_steam_record_row(record: SteamRecord) -> str:
     name_cell = f'<a href="{escaped_url}" target="_blank" rel="noreferrer">{display_name}</a>' if steamurl else display_name
     run_at = record.run.isoformat() if record.run else ""
     video_button = ""
+    review_title = escape(record.title or "", quote=True)
+    review_body = escape(record.body or "", quote=True)
+    review_content = ""
+    if record.title or record.body:
+        review_content = f'<div class="review-content" data-review-content><strong>{review_title or "Untitled"}</strong><span>{review_body}</span></div>'
+    else:
+        review_content = '<div class="review-content" data-review-content></div>'
     if record.video:
         video_url = build_public_video_url_from_field(record.video)
         video_button = (
@@ -519,11 +606,15 @@ def render_steam_record_row(record: SteamRecord) -> str:
       <form method="post" action="/steam-urls/{record.id}/run" data-run-form>
         <button type="submit">Run</button>
       </form>
+      <form method="post" action="/steam-urls/{record.id}/review" data-review-form>
+        <button class="review-button" type="submit">Review</button>
+      </form>
       <span class="row-status" data-run-status>{video_button}</span>
       <form method="post" action="/steam-urls/{record.id}/delete">
         <button class="danger" type="submit">Delete</button>
       </form>
     </div>
+    {review_content}
   </td>
 </tr>"""
 
@@ -533,6 +624,71 @@ def render_dashboard_alert(message: str) -> str:
   <strong>Dashboard is available, but the database is not connected.</strong>
   <p>{escape(message)}</p>
 </div>"""
+
+
+class SteamReview(BaseModel):
+    title: str
+    body: str
+
+
+def generate_review(steamurl: str) -> SteamReview:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OpenAI is not configured. Set OPENAI_API_KEY.")
+
+    model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": f"Steam URL: {steamurl}\n\n{REVIEW_PROMPT}"},
+                ],
+            }
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "steam_review",
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "title": {"type": "string"},
+                        "body": {"type": "string"},
+                    },
+                    "required": ["title", "body"],
+                },
+                "strict": True,
+            }
+        },
+    }
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=45,
+        )
+        response.raise_for_status()
+        data = response.json()
+        output_text = extract_response_output_text(data)
+        return SteamReview.model_validate_json(output_text)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"OpenAI review generation failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"OpenAI returned an invalid review payload: {exc}") from exc
+
+
+def extract_response_output_text(data: dict) -> str:
+    if isinstance(data.get("output_text"), str):
+        return data["output_text"]
+    for item in data.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                return content["text"]
+    raise ValueError("missing output_text")
 
 
 class SteamTitleParser(HTMLParser):
