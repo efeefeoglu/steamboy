@@ -40,7 +40,6 @@ REVIEW_PROMPT = (
 )
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 BUFFER_API_URL = "https://api.buffer.com"
-BUFFER_TARGET_SERVICES = {"instagram", "tiktok", "youtube"}
 
 app = FastAPI(title="Steamboy", version="0.1.0")
 
@@ -744,12 +743,6 @@ def share_record_video_to_buffer(record: SteamRecord) -> BufferShareResponse:
         raise HTTPException(status_code=400, detail="Steam URL has no video to share")
 
     channels = list_buffer_target_channels()
-    if not channels:
-        raise HTTPException(
-            status_code=404,
-            detail="No connected Buffer channels found for TikTok, YouTube, or Instagram.",
-        )
-
     post_text = build_buffer_post_text(record, video_url)
     posts = [create_buffer_video_post(channel, post_text, video_url) for channel in channels]
     return BufferShareResponse(video_url=video_url, posts=posts)
@@ -768,29 +761,24 @@ def build_buffer_post_text(record: SteamRecord, video_url: str) -> str:
 
 
 def list_buffer_target_channels() -> list[BufferChannel]:
-    data = buffer_graphql_request(
-        """
-        query GetChannels {
-          channels {
-            id
-            name
-            service
-          }
-        }
-        """
-    )
-    channels = data.get("channels")
-    if not isinstance(channels, list):
-        raise HTTPException(status_code=502, detail="Buffer returned an invalid channels payload")
-
-    target_channels: list[BufferChannel] = []
-    for channel in channels:
-        if not isinstance(channel, dict):
-            continue
-        service = str(channel.get("service") or "").lower()
-        if service in BUFFER_TARGET_SERVICES:
-            target_channels.append(BufferChannel.model_validate({**channel, "service": service}))
-    return target_channels
+    configured_channels = [
+        BufferChannel(id=profile_id, service=service)
+        for service, profile_id in {
+            "tiktok": os.getenv("BUFFER_TIKTOK_PROFILE_ID"),
+            "youtube": os.getenv("BUFFER_YOUTUBE_PROFILE_ID"),
+            "instagram": os.getenv("BUFFER_INSTAGRAM_PROFILE_ID"),
+        }.items()
+        if profile_id
+    ]
+    if not configured_channels:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Buffer profile IDs are not configured. Set at least one of "
+                "BUFFER_TIKTOK_PROFILE_ID, BUFFER_YOUTUBE_PROFILE_ID, or BUFFER_INSTAGRAM_PROFILE_ID."
+            ),
+        )
+    return configured_channels
 
 
 def create_buffer_video_post(channel: BufferChannel, text: str, video_url: str) -> BufferSharePost:
