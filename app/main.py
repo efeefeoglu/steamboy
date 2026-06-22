@@ -21,13 +21,14 @@ import paramiko
 import psycopg
 import requests
 import yt_dlp
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, HttpUrl
 from yt_dlp.utils import download_range_func
 
 SFTP_HOST = "vps38164.dreamhostps.com"
 SFTP_FOLDER = "efeefeoglu.com/steamboy"
+PUBLIC_VIDEO_BASE_URL = "https://efeefeoglu.com/steamboy"
 SEGMENT_SECONDS = 4
 MAX_SEGMENTS = 10
 MAX_MERGED_DURATION_SECONDS = SEGMENT_SECONDS * MAX_SEGMENTS
@@ -39,6 +40,7 @@ class SteamRecord(BaseModel):
     id: int
     steamurl: str | None = None
     name: str | None = None
+    run: datetime | None = None
 
 
 class SteamVideoRequest(BaseModel):
@@ -49,6 +51,7 @@ class SftpUploadResponse(BaseModel):
     host: str
     path: str
     filename: str
+    public_url: str
 
 
 class SteamVideoResponse(BaseModel):
@@ -68,6 +71,7 @@ class SteamVideoJobResponse(BaseModel):
     status: JobStatus
     status_url: str
     source_video_url: str
+    public_video_url: str
     created_at: datetime
     updated_at: datetime
     result: SteamVideoResponse | None = None
@@ -128,7 +132,7 @@ def dashboard() -> HTMLResponse:
         linear-gradient(135deg, #0f172a 0%, #111827 100%);
     }}
     main {{
-      width: min(980px, calc(100% - 32px));
+      width: min(1100px, calc(100% - 32px));
       margin: 0 auto;
       padding: 48px 0;
     }}
@@ -194,6 +198,28 @@ def dashboard() -> HTMLResponse:
     }}
     button.danger {{
       background: #be123c;
+    }}
+    button:disabled {{
+      cursor: wait;
+      opacity: 0.68;
+    }}
+    .row-status {{
+      color: #cbd5e1;
+      font-size: 0.92rem;
+      min-width: 5rem;
+    }}
+    .video-button {{
+      align-items: center;
+      background: #0f766e;
+      border-radius: 999px;
+      color: white;
+      display: inline-flex;
+      font-weight: 800;
+      padding: 8px 12px;
+      text-decoration: none;
+    }}
+    .error-text {{
+      color: #fca5a5;
     }}
     table {{
       border-collapse: collapse;
@@ -271,7 +297,7 @@ def dashboard() -> HTMLResponse:
           <tr>
             <th>ID</th>
             <th>Name</th>
-            <th>Steam URL</th>
+            <th>Run</th>
             <th>Actions</th>
           </tr>
         </thead>
@@ -281,6 +307,77 @@ def dashboard() -> HTMLResponse:
       </table>
     </section>
   </main>
+  <script>
+    const relativeTime = (isoValue) => {{
+      if (!isoValue) return "Never";
+      const elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(isoValue).getTime()) / 1000));
+      if (elapsedSeconds < 60) return `${{elapsedSeconds}}s ago`;
+      const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+      if (elapsedMinutes < 60) return `${{elapsedMinutes}}m ago`;
+      const elapsedHours = Math.floor(elapsedMinutes / 60);
+      if (elapsedHours < 24) return `${{elapsedHours}}h ago`;
+      const elapsedDays = Math.floor(elapsedHours / 24);
+      return `${{elapsedDays}}d ago`;
+    }};
+
+    const refreshRunTimes = () => {{
+      document.querySelectorAll("[data-run-at]").forEach((element) => {{
+        element.textContent = relativeTime(element.dataset.runAt);
+      }});
+    }};
+
+    const pollJob = async (jobUrl, row) => {{
+      const status = row.querySelector("[data-run-status]");
+      const response = await fetch(jobUrl);
+      if (!response.ok) throw new Error("Could not load job status");
+      const job = await response.json();
+
+      if (job.status === "completed") {{
+        const videoUrl = job.public_video_url || (job.result && job.result.sftp_file && job.result.sftp_file.public_url);
+        status.innerHTML = videoUrl ? `<a class="video-button" href="${{videoUrl}}" target="_blank" rel="noreferrer">Video</a>` : "Complete";
+        return;
+      }}
+
+      if (job.status === "failed") {{
+        status.innerHTML = `<span class="error-text">Failed</span>`;
+        status.title = job.error || "Video generation failed";
+        return;
+      }}
+
+      status.textContent = job.status === "running" ? "Running…" : "Queued…";
+      setTimeout(() => pollJob(jobUrl, row).catch((error) => {{
+        status.innerHTML = `<span class="error-text">${{error.message}}</span>`;
+      }}), 5000);
+    }};
+
+    document.querySelectorAll("[data-run-form]").forEach((form) => {{
+      form.addEventListener("submit", async (event) => {{
+        event.preventDefault();
+        const row = form.closest("tr");
+        const button = form.querySelector("button");
+        const runTime = row.querySelector("[data-run-at]");
+        const status = row.querySelector("[data-run-status]");
+
+        button.disabled = true;
+        status.textContent = "Queued…";
+        try {{
+          const response = await fetch(form.action, {{ method: "POST", headers: {{ Accept: "application/json" }} }});
+          if (!response.ok) throw new Error(await response.text() || "Run failed");
+          const data = await response.json();
+          runTime.dataset.runAt = data.run_at;
+          runTime.textContent = relativeTime(data.run_at);
+          await pollJob(data.status_url, row);
+        }} catch (error) {{
+          status.innerHTML = `<span class="error-text">${{error.message}}</span>`;
+        }} finally {{
+          button.disabled = false;
+        }}
+      }});
+    }});
+
+    refreshRunTimes();
+    setInterval(refreshRunTimes, 10000);
+  </script>
 </body>
 </html>"""
     )
@@ -299,16 +396,28 @@ def create_steam_url(steamurl: Annotated[str, Form()]) -> RedirectResponse:
 
 
 @app.post("/steam-urls/{record_id}/run")
-def run_steam_url(record_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
+def run_steam_url(record_id: int, background_tasks: BackgroundTasks, request: Request) -> JSONResponse | RedirectResponse:
     record = get_steam_record(record_id)
     if not record.steamurl:
         raise HTTPException(status_code=400, detail="Steam URL is empty")
 
     validate_steam_url(record.steamurl)
     ensure_ffmpeg()
-    job = create_job(record.steamurl)
+    run_at = mark_steam_record_run(record_id)
+    job = create_job(record.steamurl, build_output_filename_from_name(record.name) if record.name else None)
     background_tasks.add_task(process_steam_video_job, job.job_id)
-    return RedirectResponse(f"/steam/video-to-sftp/jobs/{job.job_id}", status_code=303)
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse(
+            {
+                "job_id": job.job_id,
+                "status": job.status,
+                "status_url": f"/steam/video-to-sftp/jobs/{job.job_id}",
+                "run_at": run_at.isoformat(),
+                "public_video_url": build_public_video_url(job.output_filename),
+            },
+            status_code=202,
+        )
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/steam-urls/{record_id}/delete")
@@ -356,16 +465,25 @@ def get_db_connection() -> psycopg.Connection[tuple]:
 
 def list_steam_records() -> list[SteamRecord]:
     with get_db_connection() as connection:
-        rows = connection.execute('SELECT "id", "steamurl", "name" FROM "steam" ORDER BY "id"').fetchall()
-    return [SteamRecord(id=row[0], steamurl=row[1], name=row[2]) for row in rows]
+        rows = connection.execute('SELECT "id", "steamurl", "name", "run" FROM "steam" ORDER BY "id"').fetchall()
+    return [SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3]) for row in rows]
 
 
 def get_steam_record(record_id: int) -> SteamRecord:
     with get_db_connection() as connection:
-        row = connection.execute('SELECT "id", "steamurl" FROM "steam" WHERE "id" = %s', (record_id,)).fetchone()
+        row = connection.execute('SELECT "id", "steamurl", "name", "run" FROM "steam" WHERE "id" = %s', (record_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Steam URL not found")
-    return SteamRecord(id=row[0], steamurl=row[1])
+    return SteamRecord(id=row[0], steamurl=row[1], name=row[2], run=row[3])
+
+
+def mark_steam_record_run(record_id: int) -> datetime:
+    run_at = datetime.now(UTC)
+    with get_db_connection() as connection:
+        result = connection.execute('UPDATE "steam" SET "run" = %s WHERE "id" = %s', (run_at, record_id))
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Steam URL not found")
+    return run_at
 
 
 def render_steam_record_row(record: SteamRecord) -> str:
@@ -373,17 +491,18 @@ def render_steam_record_row(record: SteamRecord) -> str:
     escaped_url = escape(steamurl, quote=True)
     escaped_name = escape(record.name or "", quote=True)
     display_name = escaped_name or "<em>Unknown game</em>"
-    display_url = escaped_url or "<em>Empty URL</em>"
-    link = f'<a href="{escaped_url}" target="_blank" rel="noreferrer">{display_url}</a>' if steamurl else display_url
+    name_cell = f'<a href="{escaped_url}" target="_blank" rel="noreferrer">{display_name}</a>' if steamurl else display_name
+    run_at = record.run.isoformat() if record.run else ""
     return f"""<tr>
   <td>{record.id}</td>
-  <td>{display_name}</td>
-  <td>{link}</td>
+  <td>{name_cell}</td>
+  <td><span data-run-at="{escape(run_at, quote=True)}"></span></td>
   <td>
     <div class="actions">
-      <form method="post" action="/steam-urls/{record.id}/run">
+      <form method="post" action="/steam-urls/{record.id}/run" data-run-form>
         <button type="submit">Run</button>
       </form>
+      <span class="row-status" data-run-status></span>
       <form method="post" action="/steam-urls/{record.id}/delete">
         <button class="danger" type="submit">Delete</button>
       </form>
@@ -449,8 +568,8 @@ def normalize_dashboard_steam_url(steamurl: str) -> str:
     return normalized_url
 
 
-def create_job(steam_url: str) -> SteamVideoJob:
-    job = SteamVideoJob(job_id=uuid4().hex, steam_url=steam_url, output_filename=build_output_filename(steam_url))
+def create_job(steam_url: str, output_filename: str | None = None) -> SteamVideoJob:
+    job = SteamVideoJob(job_id=uuid4().hex, steam_url=steam_url, output_filename=output_filename or build_output_filename(steam_url))
     with jobs_lock:
         jobs[job.job_id] = job
     return job
@@ -470,6 +589,7 @@ def serialize_job(job: SteamVideoJob) -> SteamVideoJobResponse:
         status=job.status,
         status_url=f"/steam/video-to-sftp/jobs/{job.job_id}",
         source_video_url=job.steam_url,
+        public_video_url=build_public_video_url(job.output_filename),
         created_at=job.created_at,
         updated_at=job.updated_at,
         result=job.result,
@@ -521,7 +641,15 @@ def build_output_filename(steam_url: str) -> str:
     parsed = urlparse(steam_url)
     path_parts = [part for part in parsed.path.split("/") if part]
     raw_name = path_parts[2] if len(path_parts) >= 3 else path_parts[1]
-    return f"{quote(raw_name, safe='')}.mp4"
+    return build_output_filename_from_name(raw_name)
+
+
+def build_output_filename_from_name(name: str) -> str:
+    return f"{quote(name, safe='')}.mp4"
+
+
+def build_public_video_url(filename: str) -> str:
+    return f"{PUBLIC_VIDEO_BASE_URL}/{filename}"
 
 
 def validate_steam_url(url: str) -> None:
@@ -673,7 +801,7 @@ def upload_to_sftp(file_path: Path, filename: str) -> SftpUploadResponse:
         if "transport" in locals():
             transport.close()
 
-    return SftpUploadResponse(host=SFTP_HOST, path=remote_path, filename=filename)
+    return SftpUploadResponse(host=SFTP_HOST, path=remote_path, filename=filename, public_url=build_public_video_url(filename))
 
 
 def ensure_remote_directory(sftp: paramiko.SFTPClient, remote_directory: str) -> None:
