@@ -36,7 +36,7 @@ MAX_SEGMENTS = 10
 MAX_MERGED_DURATION_SECONDS = SEGMENT_SECONDS * MAX_SEGMENTS
 REVIEW_PROMPT = (
     "Write a short casual social media reaction/review post with: "
-    "a short title, a post body."
+    "a short title, a post body. Add a little humor sauce and body should contain one or two hashtags"
 )
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 BUFFER_API_URL = "https://api.buffer.com"
