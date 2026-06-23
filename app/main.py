@@ -749,15 +749,7 @@ def share_record_video_to_buffer(record: SteamRecord) -> BufferShareResponse:
 
 
 def build_buffer_post_text(record: SteamRecord, video_url: str) -> str:
-    parts = []
-    if record.title:
-        parts.append(record.title.strip())
-    elif record.name:
-        parts.append(record.name.strip())
-    if record.body:
-        parts.append(record.body.strip())
-    parts.append(video_url)
-    return "\n\n".join(part for part in parts if part)
+    return (record.body or "").strip()
 
 
 def list_buffer_target_channels() -> list[BufferChannel]:
