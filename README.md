@@ -66,7 +66,7 @@ The dashboard supports:
 - Deleting saved Steam store URLs
 - Scheduling the uploaded video through Buffer on the configured TikTok, YouTube, and Instagram profile IDs
 
-If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error. The Review button sends the Steam URL to the configured OpenAI model with the prompt: `Write a short casual social media reaction/review post with: a short title, a post body.` The Share button requires a previously generated video and schedules it by adding one Buffer post to the queue for each configured `BUFFER_TIKTOK_PROFILE_ID`, `BUFFER_YOUTUBE_PROFILE_ID`, and `BUFFER_INSTAGRAM_PROFILE_ID`. The scheduled post text uses the saved review title/body when present, otherwise the game name, plus the public video URL. YouTube posts are created with the Gaming category.
+If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error. The Review button sends the Steam URL to the configured OpenAI model with the prompt: `Write a short casual social media reaction/review post with: a short title, a post body.` The Share button requires a previously generated video and schedules it by adding one Buffer post to the queue for each configured `BUFFER_TIKTOK_PROFILE_ID`, `BUFFER_YOUTUBE_PROFILE_ID`, and `BUFFER_INSTAGRAM_PROFILE_ID`. The scheduled post text uses only the saved review body; the video is attached as a Buffer asset. YouTube posts are created with the Gaming category.
 
 ### Video processing API
 
