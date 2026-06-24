@@ -3,19 +3,20 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from uuid import uuid4
 
 import imageio_ffmpeg
@@ -23,6 +24,7 @@ import paramiko
 import psycopg
 import requests
 import yt_dlp
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, HttpUrl
@@ -41,6 +43,11 @@ REVIEW_PROMPT = (
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 BUFFER_API_URL = "https://api.buffer.com"
 YOUTUBE_UPLOAD_API_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
+YOUTUBE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+YOUTUBE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+YOUTUBE_OAUTH_STATE_TTL_SECONDS = 600
+YOUTUBE_TOKEN_ENCRYPTION_PREFIX = "fernet:"
 
 app = FastAPI(title="Steamboy", version="0.1.0")
 
@@ -125,10 +132,12 @@ class SteamVideoJob:
 
 jobs: dict[str, SteamVideoJob] = {}
 jobs_lock = Lock()
+youtube_oauth_states: dict[str, datetime] = {}
+youtube_oauth_states_lock = Lock()
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard() -> HTMLResponse:
+def dashboard(request: Request) -> HTMLResponse:
     records: list[SteamRecord] = []
     dashboard_message = ""
     try:
@@ -137,6 +146,10 @@ def dashboard() -> HTMLResponse:
         dashboard_message = render_dashboard_alert(str(exc.detail))
     except psycopg.Error as exc:
         dashboard_message = render_dashboard_alert(f"Could not load Steam URLs from Neon DB: {exc}")
+
+    youtube_message = request.query_params.get("youtube")
+    if youtube_message == "connected":
+        dashboard_message += render_dashboard_alert("YouTube connected successfully.", kind="success")
 
     rows = "\n".join(render_steam_record_row(record) for record in records)
     if not rows:
@@ -349,6 +362,24 @@ def dashboard() -> HTMLResponse:
       margin: 0 0 20px;
       padding: 14px 16px;
     }}
+    .alert.success {{
+      background: rgba(22, 163, 74, 0.16);
+      border-color: rgba(74, 222, 128, 0.42);
+      color: #dcfce7;
+    }}
+    .header-actions {{
+      margin-top: 16px;
+    }}
+    .button-link {{
+      align-items: center;
+      background: linear-gradient(135deg, #dc2626, #9333ea);
+      border-radius: 14px;
+      color: white;
+      display: inline-flex;
+      font-weight: 800;
+      padding: 13px 18px;
+      text-decoration: none;
+    }}
     @media (max-width: 720px) {{
       .add-form {{
         grid-template-columns: 1fr;
@@ -376,6 +407,7 @@ def dashboard() -> HTMLResponse:
     <header>
       <h1>Steamboy Dashboard</h1>
       <p>Add, run, and delete Steam store URLs saved in your Neon Postgres <code>steam</code> table.</p>
+      <div class="header-actions"><a class="button-link" href="/youtube/login">Connect YouTube</a></div>
     </header>
     {dashboard_message}
 
@@ -538,6 +570,145 @@ def dashboard() -> HTMLResponse:
 </body>
 </html>"""
     )
+
+
+@app.get("/youtube/login", response_class=HTMLResponse)
+def youtube_login() -> HTMLResponse:
+    connected = has_stored_youtube_oauth_token()
+    configured = bool(os.getenv("YOUTUBE_CLIENT_ID") and os.getenv("YOUTUBE_CLIENT_SECRET") and get_youtube_redirect_uri())
+    status_text = "Connected" if connected else "Not connected"
+    helper_text = (
+        "Your OAuth refresh token is stored in the configured database."
+        if connected
+        else "Connect a Google account with permission to upload unlisted YouTube videos."
+    )
+    disabled = "" if configured else " disabled"
+    config_warning = (
+        ""
+        if configured
+        else '<p class="warning">Set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, and YOUTUBE_REDIRECT_URI before connecting YouTube.</p>'
+    )
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect YouTube</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #101827;
+      color: #f8fafc;
+    }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(220, 38, 38, 0.2), transparent 32rem),
+        linear-gradient(135deg, #0f172a 0%, #111827 100%);
+      display: grid;
+      place-items: center;
+    }}
+    main {{
+      width: min(36rem, calc(100% - 32px));
+      background: rgba(15, 23, 42, 0.82);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 24px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      padding: 28px;
+    }}
+    h1 {{
+      margin: 0 0 10px;
+      font-size: clamp(2rem, 5vw, 3rem);
+      letter-spacing: -0.05em;
+    }}
+    p {{
+      color: #cbd5e1;
+      line-height: 1.6;
+    }}
+    .status {{
+      color: {"#86efac" if connected else "#fca5a5"};
+      font-weight: 900;
+    }}
+    button, .back {{
+      border: 0;
+      border-radius: 14px;
+      color: white;
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-weight: 800;
+      margin-right: 10px;
+      padding: 13px 18px;
+      text-decoration: none;
+    }}
+    button {{
+      background: linear-gradient(135deg, #dc2626, #9333ea);
+    }}
+    button:disabled {{
+      cursor: not-allowed;
+      opacity: 0.55;
+    }}
+    .back {{
+      background: #334155;
+    }}
+    .warning {{
+      color: #fef3c7;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>YouTube OAuth</h1>
+    <p>Status: <span class="status">{status_text}</span></p>
+    <p>{helper_text}</p>
+    {config_warning}
+    <p>
+      <a class="back" href="/">Back to dashboard</a>
+      <form method="get" action="/auth/youtube/start" style="display:inline">
+        <button type="submit"{disabled}>Connect YouTube</button>
+      </form>
+    </p>
+  </main>
+</body>
+</html>"""
+    )
+
+
+@app.get("/auth/youtube/start")
+def start_youtube_oauth() -> RedirectResponse:
+    client_id = os.getenv("YOUTUBE_CLIENT_ID")
+    redirect_uri = get_youtube_redirect_uri()
+    if not client_id or not redirect_uri:
+        raise HTTPException(status_code=500, detail="YouTube OAuth is not configured. Set YOUTUBE_CLIENT_ID and YOUTUBE_REDIRECT_URI.")
+
+    state = create_youtube_oauth_state()
+    return RedirectResponse(
+        f"{YOUTUBE_AUTH_URL}?{urlencode({
+            'client_id': client_id,
+            'redirect_uri': redirect_uri,
+            'response_type': 'code',
+            'scope': YOUTUBE_UPLOAD_SCOPE,
+            'access_type': 'offline',
+            'prompt': 'consent',
+            'state': state,
+        })}",
+        status_code=302,
+    )
+
+
+@app.get("/auth/youtube/callback")
+def youtube_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None) -> RedirectResponse:
+    if error:
+        raise HTTPException(status_code=400, detail=f"YouTube OAuth failed: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="YouTube OAuth callback did not include a code.")
+    validate_youtube_oauth_state(state)
+    token_payload = exchange_youtube_code_for_tokens(code)
+    store_youtube_oauth_tokens(token_payload)
+    return RedirectResponse("/?youtube=connected", status_code=303)
 
 
 @app.post("/steam-urls")
@@ -838,14 +1009,242 @@ def build_buffer_post_metadata(service: str, title: str) -> dict[str, dict[str, 
     return {}
 
 
+
+def get_youtube_token_cipher() -> Fernet | None:
+    key = os.getenv("YOUTUBE_TOKEN_ENCRYPTION_KEY")
+    if not key:
+        return None
+    try:
+        return Fernet(key.encode())
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="YOUTUBE_TOKEN_ENCRYPTION_KEY must be a valid Fernet key.") from exc
+
+
+def protect_youtube_token(token: str | None) -> str | None:
+    if token is None:
+        return None
+    cipher = get_youtube_token_cipher()
+    if cipher is None:
+        return token
+    return f"{YOUTUBE_TOKEN_ENCRYPTION_PREFIX}{cipher.encrypt(token.encode()).decode()}"
+
+
+def reveal_youtube_token(token: str | None) -> str | None:
+    if token is None or not token.startswith(YOUTUBE_TOKEN_ENCRYPTION_PREFIX):
+        return token
+    cipher = get_youtube_token_cipher()
+    if cipher is None:
+        raise HTTPException(status_code=500, detail="Stored YouTube tokens are encrypted. Set YOUTUBE_TOKEN_ENCRYPTION_KEY.")
+    encrypted_value = token.removeprefix(YOUTUBE_TOKEN_ENCRYPTION_PREFIX)
+    try:
+        return cipher.decrypt(encrypted_value.encode()).decode()
+    except InvalidToken as exc:
+        raise HTTPException(status_code=500, detail="Stored YouTube token could not be decrypted.") from exc
+
+def get_youtube_redirect_uri() -> str | None:
+    return os.getenv("YOUTUBE_REDIRECT_URI")
+
+
+def create_youtube_oauth_state() -> str:
+    state = secrets.token_urlsafe(32)
+    expires_at = datetime.now(UTC) + timedelta(seconds=YOUTUBE_OAUTH_STATE_TTL_SECONDS)
+    with youtube_oauth_states_lock:
+        prune_expired_youtube_oauth_states()
+        youtube_oauth_states[state] = expires_at
+    return state
+
+
+def validate_youtube_oauth_state(state: str | None) -> None:
+    if not state:
+        raise HTTPException(status_code=400, detail="Missing YouTube OAuth state.")
+    with youtube_oauth_states_lock:
+        expires_at = youtube_oauth_states.pop(state, None)
+    if expires_at is None or expires_at < datetime.now(UTC):
+        raise HTTPException(status_code=400, detail="Invalid or expired YouTube OAuth state.")
+
+
+def prune_expired_youtube_oauth_states() -> None:
+    now = datetime.now(UTC)
+    expired_states = [state for state, expires_at in youtube_oauth_states.items() if expires_at < now]
+    for state in expired_states:
+        youtube_oauth_states.pop(state, None)
+
+
+def exchange_youtube_code_for_tokens(code: str) -> dict:
+    client_id = os.getenv("YOUTUBE_CLIENT_ID")
+    client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
+    redirect_uri = get_youtube_redirect_uri()
+    if not client_id or not client_secret or not redirect_uri:
+        raise HTTPException(
+            status_code=500,
+            detail="YouTube OAuth is not configured. Set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, and YOUTUBE_REDIRECT_URI.",
+        )
+    return youtube_token_request(
+        {
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }
+    )
+
+
+def refresh_youtube_access_token(refresh_token: str) -> dict:
+    client_id = os.getenv("YOUTUBE_CLIENT_ID")
+    client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=500, detail="YouTube OAuth is not configured. Set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET.")
+    return youtube_token_request(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+    )
+
+
+def youtube_token_request(data: dict[str, str]) -> dict:
+    try:
+        response = requests.post(YOUTUBE_TOKEN_URL, data=data, timeout=45)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.HTTPError as exc:
+        response_text = exc.response.text[:1000] if exc.response is not None else ""
+        detail = f"YouTube OAuth token request failed: {exc}"
+        if response_text:
+            detail = f"{detail}. Response: {response_text}"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"YouTube OAuth token request failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"YouTube OAuth token response was invalid JSON: {exc}") from exc
+    if not payload.get("access_token"):
+        raise HTTPException(status_code=502, detail="YouTube OAuth token response did not include an access token.")
+    return payload
+
+
+def get_youtube_token_expires_at(token_payload: dict) -> datetime:
+    expires_in = int(token_payload.get("expires_in") or 3600)
+    return datetime.now(UTC) + timedelta(seconds=max(0, expires_in - 60))
+
+
+def ensure_youtube_oauth_table(connection: psycopg.Connection[tuple]) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS youtube_oauth_tokens (
+            id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+            google_user_id text,
+            access_token text NOT NULL,
+            refresh_token text,
+            expires_at timestamptz NOT NULL,
+            scope text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+
+
+def store_youtube_oauth_tokens(token_payload: dict) -> None:
+    refresh_token = token_payload.get("refresh_token")
+    existing = get_stored_youtube_oauth_token()
+    if not refresh_token and existing:
+        refresh_token = existing.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=502, detail="Google did not return a refresh token. Reconnect with prompt=consent.")
+    expires_at = get_youtube_token_expires_at(token_payload)
+    with get_db_connection() as connection:
+        ensure_youtube_oauth_table(connection)
+        connection.execute(
+            """
+            INSERT INTO youtube_oauth_tokens (google_user_id, access_token, refresh_token, expires_at, scope, updated_at)
+            VALUES (%s, %s, %s, %s, %s, now())
+            """,
+            (
+                "default",
+                protect_youtube_token(token_payload["access_token"]),
+                protect_youtube_token(refresh_token),
+                expires_at,
+                token_payload.get("scope") or YOUTUBE_UPLOAD_SCOPE,
+            ),
+        )
+
+
+def get_stored_youtube_oauth_token() -> dict | None:
+    try:
+        with get_db_connection() as connection:
+            ensure_youtube_oauth_table(connection)
+            row = connection.execute(
+                """
+                SELECT id, access_token, refresh_token, expires_at, scope
+                FROM youtube_oauth_tokens
+                WHERE google_user_id = %s
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                ("default",),
+            ).fetchone()
+    except HTTPException as exc:
+        if exc.status_code == 500 and "Database is not configured" in str(exc.detail):
+            return None
+        raise
+    except psycopg.Error:
+        return None
+    if row is None:
+        return None
+    return {"id": row[0], "access_token": reveal_youtube_token(row[1]), "refresh_token": reveal_youtube_token(row[2]), "expires_at": row[3], "scope": row[4]}
+
+
+def has_stored_youtube_oauth_token() -> bool:
+    return get_stored_youtube_oauth_token() is not None
+
+
+def update_stored_youtube_access_token(token_id: int, token_payload: dict, refresh_token: str) -> None:
+    with get_db_connection() as connection:
+        ensure_youtube_oauth_table(connection)
+        connection.execute(
+            """
+            UPDATE youtube_oauth_tokens
+            SET access_token = %s, refresh_token = %s, expires_at = %s, scope = %s, updated_at = now()
+            WHERE id = %s
+            """,
+            (
+                protect_youtube_token(token_payload["access_token"]),
+                protect_youtube_token(token_payload.get("refresh_token") or refresh_token),
+                get_youtube_token_expires_at(token_payload),
+                token_payload.get("scope") or YOUTUBE_UPLOAD_SCOPE,
+                token_id,
+            ),
+        )
+
+
+def get_valid_youtube_access_token() -> str | None:
+    token = get_stored_youtube_oauth_token()
+    if not token:
+        return os.getenv("YOUTUBE_ACCESS_TOKEN")
+    expires_at = token["expires_at"]
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at and expires_at > datetime.now(UTC):
+        return str(token["access_token"])
+    refresh_token = token.get("refresh_token")
+    if not refresh_token:
+        return os.getenv("YOUTUBE_ACCESS_TOKEN")
+    refreshed = refresh_youtube_access_token(str(refresh_token))
+    update_stored_youtube_access_token(int(token["id"]), refreshed, str(refresh_token))
+    return str(refreshed["access_token"])
+
+
 def is_youtube_api_configured() -> bool:
-    return bool(os.getenv("YOUTUBE_ACCESS_TOKEN"))
+    return bool(get_stored_youtube_oauth_token() or os.getenv("YOUTUBE_ACCESS_TOKEN"))
 
 
 def create_youtube_video_post(record: SteamRecord, text: str, video_url: str) -> BufferSharePost:
-    access_token = os.getenv("YOUTUBE_ACCESS_TOKEN")
+    access_token = get_valid_youtube_access_token()
     if not access_token:
-        raise HTTPException(status_code=500, detail="YouTube API is not configured. Set YOUTUBE_ACCESS_TOKEN.")
+        raise HTTPException(status_code=500, detail="YouTube API is not configured. Connect YouTube OAuth or set YOUTUBE_ACCESS_TOKEN.")
 
     title = build_buffer_video_title(text or record.title or record.name or "Steamboy video")
     description = text.strip() or title
@@ -960,9 +1359,11 @@ def buffer_graphql_request(query: str, variables: dict | None = None) -> dict:
     return data
 
 
-def render_dashboard_alert(message: str) -> str:
-    return f"""<div class="alert" role="alert">
-  <strong>Dashboard is available, but the database is not connected.</strong>
+def render_dashboard_alert(message: str, kind: str = "warning") -> str:
+    title = "Success" if kind == "success" else "Dashboard is available, but the database is not connected."
+    class_name = "alert success" if kind == "success" else "alert"
+    return f"""<div class="{class_name}" role="alert">
+  <strong>{escape(title)}</strong>
   <p>{escape(message)}</p>
 </div>"""
 
