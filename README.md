@@ -20,14 +20,20 @@ Set the following environment variables for SFTP authentication:
 - `OPENAI_API_KEY`: API key used by the Review button to generate social posts
 - `BUFFER_API_KEY`: API key used by the Share button to schedule generated videos on Buffer
 - `BUFFER_TIKTOK_PROFILE_ID`: optional Buffer profile/channel ID for TikTok sharing
-- `YOUTUBE_ACCESS_TOKEN`: optional OAuth 2.0 bearer token with YouTube upload scope, used by the Share button to upload directly to YouTube as an unlisted video
 - `BUFFER_INSTAGRAM_PROFILE_ID`: optional Buffer profile/channel ID for Instagram sharing
+- `YOUTUBE_CLIENT_ID`: Google OAuth client ID used by `/youtube/login`
+- `YOUTUBE_CLIENT_SECRET`: Google OAuth client secret used only by the backend token exchange
+- `YOUTUBE_REDIRECT_URI`: OAuth callback URL registered in Google Cloud, for example `http://localhost:8000/auth/youtube/callback`
+- `YOUTUBE_TOKEN_ENCRYPTION_KEY`: optional Fernet key used to encrypt stored YouTube access and refresh tokens; generate one with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+- `YOUTUBE_ACCESS_TOKEN`: optional development-only OAuth 2.0 bearer token fallback with YouTube upload scope, used only when no stored OAuth token exists
 
 Optional:
 
 - `WORK_DIR`: temporary workspace path (default: `/tmp/steamboy`)
 - `FFMPEG_BINARY`: optional path to an ffmpeg executable; if unset, the service uses system `ffmpeg` first and then falls back to `imageio-ffmpeg`
 - `OPENAI_MODEL`: optional model for review generation (default: `gpt-4.1-mini`)
+
+Do not commit downloaded Google OAuth JSON files or expose `YOUTUBE_CLIENT_SECRET` to frontend JavaScript. In production, set `YOUTUBE_TOKEN_ENCRYPTION_KEY` or use managed secrets storage for refresh tokens.
 
 ## Run locally
 
@@ -65,9 +71,31 @@ The dashboard supports:
 - Showing the latest run time as a relative timestamp and showing a Video button when the `video` field has a value
 - Deleting saved Steam store URLs
 - Scheduling the uploaded video through Buffer on the configured TikTok and Instagram profile IDs
-- Uploading the video directly to YouTube as an unlisted video when `YOUTUBE_ACCESS_TOKEN` is configured
+- Connecting YouTube at `/youtube/login` and uploading the video directly to YouTube as an unlisted video when a stored OAuth token or the development `YOUTUBE_ACCESS_TOKEN` fallback is configured
 
-If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error. The Review button sends the Steam URL to the configured OpenAI model with the prompt: `Write a short casual social media reaction/review post with: a short title, a post body.` The Share button requires a previously generated video. It adds one Buffer post to the queue for each configured `BUFFER_TIKTOK_PROFILE_ID` and `BUFFER_INSTAGRAM_PROFILE_ID`, and uploads one direct YouTube API video when `YOUTUBE_ACCESS_TOKEN` is configured. The Buffer scheduled post text uses only the saved review body; the video is attached as a Buffer asset. Direct YouTube uploads use the saved review body as the description, the Gaming category, and `privacyStatus: "unlisted"`.
+If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error. The Review button sends the Steam URL to the configured OpenAI model with the prompt: `Write a short casual social media reaction/review post with: a short title, a post body.` The Share button requires a previously generated video. It adds one Buffer post to the queue for each configured `BUFFER_TIKTOK_PROFILE_ID` and `BUFFER_INSTAGRAM_PROFILE_ID`, and uploads one direct YouTube API video when YouTube OAuth is connected or the development `YOUTUBE_ACCESS_TOKEN` fallback is configured. The Buffer scheduled post text uses only the saved review body; the video is attached as a Buffer asset. Direct YouTube uploads use the saved review body as the description, the Gaming category, and `privacyStatus: "unlisted"`.
+
+
+### YouTube OAuth
+
+`GET /youtube/login` shows the YouTube connection status and a **Connect YouTube** button. The OAuth start route redirects to Google with the `https://www.googleapis.com/auth/youtube.upload` scope, `access_type=offline`, `prompt=consent`, and a validated `state` value to protect against CSRF.
+
+Create the token persistence table in Neon, or let the app create it on first use:
+
+```sql
+CREATE TABLE IF NOT EXISTS youtube_oauth_tokens (
+  id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  google_user_id text,
+  access_token text NOT NULL,
+  refresh_token text,
+  expires_at timestamptz NOT NULL,
+  scope text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+This app treats YouTube as a single admin connection and stores rows with `google_user_id = 'default'`. When `YOUTUBE_TOKEN_ENCRYPTION_KEY` is configured, tokens are encrypted before they are written to the table.
 
 ### Video processing API
 
