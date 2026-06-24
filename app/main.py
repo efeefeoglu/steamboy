@@ -40,6 +40,7 @@ REVIEW_PROMPT = (
 )
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 BUFFER_API_URL = "https://api.buffer.com"
+YOUTUBE_UPLOAD_API_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 
 app = FastAPI(title="Steamboy", version="0.1.0")
 
@@ -596,7 +597,7 @@ def share_steam_url(record_id: int, request: Request) -> JSONResponse | Redirect
     if not record.video:
         raise HTTPException(status_code=400, detail="Run this Steam URL before sharing so a video is available.")
 
-    share = share_record_video_to_buffer(record)
+    share = share_record_video(record)
     if "application/json" in request.headers.get("accept", ""):
         return JSONResponse(share.model_dump(mode="json"))
     return RedirectResponse("/", status_code=303)
@@ -737,14 +738,25 @@ def render_steam_record_row(record: SteamRecord) -> str:
 </tr>"""
 
 
-def share_record_video_to_buffer(record: SteamRecord) -> BufferShareResponse:
+def share_record_video(record: SteamRecord) -> BufferShareResponse:
     video_url = build_public_video_url_from_field(record.video or "")
     if not video_url:
         raise HTTPException(status_code=400, detail="Steam URL has no video to share")
 
     channels = list_buffer_target_channels()
+    if not channels and not is_youtube_api_configured():
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Sharing is not configured. Set YOUTUBE_ACCESS_TOKEN for direct YouTube uploads, "
+                "or set BUFFER_TIKTOK_PROFILE_ID or BUFFER_INSTAGRAM_PROFILE_ID for Buffer sharing."
+            ),
+        )
+
     post_text = build_buffer_post_text(record, video_url)
     posts = [create_buffer_video_post(channel, post_text, video_url) for channel in channels]
+    if is_youtube_api_configured():
+        posts.append(create_youtube_video_post(record, post_text, video_url))
     return BufferShareResponse(video_url=video_url, posts=posts)
 
 
@@ -757,19 +769,10 @@ def list_buffer_target_channels() -> list[BufferChannel]:
         BufferChannel(id=profile_id, service=service)
         for service, profile_id in {
             "tiktok": os.getenv("BUFFER_TIKTOK_PROFILE_ID"),
-            "youtube": os.getenv("BUFFER_YOUTUBE_PROFILE_ID"),
             "instagram": os.getenv("BUFFER_INSTAGRAM_PROFILE_ID"),
         }.items()
         if profile_id
     ]
-    if not configured_channels:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Buffer profile IDs are not configured. Set at least one of "
-                "BUFFER_TIKTOK_PROFILE_ID, BUFFER_YOUTUBE_PROFILE_ID, or BUFFER_INSTAGRAM_PROFILE_ID."
-            ),
-        )
     return configured_channels
 
 
@@ -830,11 +833,96 @@ def build_buffer_video_title(text: str) -> str:
 def build_buffer_post_metadata(service: str, title: str) -> dict[str, dict[str, object]]:
     if service == "instagram":
         return {"instagram": {"type": "reel", "shouldShareToFeed": True}}
-    if service == "youtube":
-        return {"youtube": {"title": title, "privacy": "public", "categoryId": "20", "madeForKids": False}}
     if service == "tiktok":
         return {"tiktok": {"isAiGenerated": False}}
     return {}
+
+
+def is_youtube_api_configured() -> bool:
+    return bool(os.getenv("YOUTUBE_ACCESS_TOKEN"))
+
+
+def create_youtube_video_post(record: SteamRecord, text: str, video_url: str) -> BufferSharePost:
+    access_token = os.getenv("YOUTUBE_ACCESS_TOKEN")
+    if not access_token:
+        raise HTTPException(status_code=500, detail="YouTube API is not configured. Set YOUTUBE_ACCESS_TOKEN.")
+
+    title = build_buffer_video_title(text or record.title or record.name or "Steamboy video")
+    description = text.strip() or title
+    video_path = download_video_for_youtube_upload(video_url)
+    try:
+        with video_path.open("rb") as video_file:
+            initiate_response = requests.post(
+                f"{YOUTUBE_UPLOAD_API_URL}?part=snippet,status",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "X-Upload-Content-Type": "video/mp4",
+                    "X-Upload-Content-Length": str(video_path.stat().st_size),
+                },
+                json={
+                    "snippet": {
+                        "title": title,
+                        "description": description,
+                        "categoryId": "20",
+                    },
+                    "status": {
+                        "privacyStatus": "unlisted",
+                        "selfDeclaredMadeForKids": False,
+                    },
+                },
+                timeout=45,
+            )
+            initiate_response.raise_for_status()
+            upload_url = initiate_response.headers.get("Location")
+            if not upload_url:
+                raise HTTPException(status_code=502, detail="YouTube API did not return a resumable upload URL")
+
+            upload_response = requests.put(
+                upload_url,
+                headers={"Content-Type": "video/mp4"},
+                data=video_file,
+                timeout=300,
+            )
+            upload_response.raise_for_status()
+            payload = upload_response.json()
+    except requests.HTTPError as exc:
+        response_text = exc.response.text[:1000] if exc.response is not None else ""
+        detail = f"YouTube API request failed: {exc}"
+        if response_text:
+            detail = f"{detail}. Response: {response_text}"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"YouTube API request failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"YouTube API returned invalid JSON: {exc}") from exc
+    finally:
+        video_path.unlink(missing_ok=True)
+
+    youtube_video_id = payload.get("id")
+    if not youtube_video_id:
+        raise HTTPException(status_code=502, detail="YouTube API did not return an uploaded video ID")
+
+    return BufferSharePost(
+        id=str(youtube_video_id),
+        channel_id="youtube-api",
+        channel_name="YouTube API",
+        service="youtube",
+        due_at=None,
+    )
+
+
+def download_video_for_youtube_upload(video_url: str) -> Path:
+    try:
+        with requests.get(video_url, stream=True, timeout=45) as response:
+            response.raise_for_status()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as video_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        video_file.write(chunk)
+                return Path(video_file.name)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Could not download video for YouTube upload: {exc}") from exc
 
 
 def buffer_graphql_request(query: str, variables: dict | None = None) -> dict:
