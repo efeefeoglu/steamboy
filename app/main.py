@@ -1719,7 +1719,8 @@ class SteamGalleryPhotoParser(HTMLParser):
             attributes = dict(attrs)
             if not self._is_smaller_than_gallery_minimum(attributes):
                 photo = self._get_image_url(attributes)
-                console.
+                console.log(photo)
+                print(photo)
                 if photo and photo not in self.photos:
                     self.photos.append(photo)
 
