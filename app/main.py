@@ -585,9 +585,9 @@ def gallery() -> HTMLResponse:
 
 
 @app.post("/gallery", response_class=HTMLResponse)
-def build_gallery(steamurls: Annotated[str, Form()]) -> HTMLResponse:
+def build_gallery(steamurls: Annotated[str, Form()], llm_enabled: Annotated[bool, Form()] = True) -> HTMLResponse:
     urls = parse_gallery_steam_urls(steamurls)
-    games = [fetch_steam_gallery_game(url) for url in urls]
+    games = [fetch_steam_gallery_game(url, llm_enabled=llm_enabled) for url in urls]
     return render_gallery_step_two(games)
 
 
@@ -1394,12 +1394,18 @@ def render_gallery_step_one() -> HTMLResponse:
     <header>
       <p class="eyebrow">Step 1 of 2</p>
       <h1>Build a Steam gallery</h1>
-      <p>Add one Steam store URL per line. Steamboy will fetch each game name, generate a tiny spicy blurb, and collect gallery photos for the next step.</p>
+      <p>Add one Steam store URL per line. Steamboy will fetch each game name, optionally generate a tiny spicy blurb, and collect gallery photos for the next step.</p>
     </header>
     <section>
       <form method="post" action="/gallery">
         <label for="steamurls">Steam URLs</label>
         <textarea id="steamurls" name="steamurls" rows="10" placeholder="https://store.steampowered.com/app/730/CounterStrike_2/&#10;https://store.steampowered.com/app/570/Dota_2/" required></textarea>
+        <fieldset class="toggle-group">
+          <legend>LLM custom text</legend>
+          <label class="toggle-option"><input type="radio" name="llm_enabled" value="true" checked> On</label>
+          <label class="toggle-option"><input type="radio" name="llm_enabled" value="false"> Off</label>
+          <p>Turn off to skip LLM descriptions and leave custom text fields empty.</p>
+        </fieldset>
         <button type="submit">Continue to gallery</button>
       </form>
     </section>
@@ -1487,6 +1493,10 @@ def render_gallery_styles() -> str:
     section { background: rgba(15, 23, 42, 0.78); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35); padding: 24px; margin-top: 20px; backdrop-filter: blur(16px); }
     label { color: #e2e8f0; display: block; font-weight: 800; margin: 0 0 10px; }
     input[type="text"], textarea { width: 100%; box-sizing: border-box; border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 14px; color: #f8fafc; background: rgba(15, 23, 42, 0.95); padding: 13px 14px; font: inherit; outline: none; margin-bottom: 18px; }
+    .toggle-group { border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 16px; display: flex; flex-wrap: wrap; gap: 12px 18px; margin: 0 0 18px; padding: 16px; }
+    .toggle-group legend { color: #e2e8f0; font-weight: 900; padding: 0 6px; }
+    .toggle-group p { flex-basis: 100%; margin: 0; }
+    .toggle-option { align-items: center; display: inline-flex; gap: 8px; margin: 0; }
     textarea { resize: vertical; }
     input:focus, textarea:focus { border-color: #5eead4; box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.14); }
     button { border: 0; border-radius: 14px; background: linear-gradient(135deg, #0d9488, #2563eb); color: white; cursor: pointer; font: inherit; font-weight: 900; padding: 13px 18px; }
@@ -1512,13 +1522,13 @@ def parse_gallery_steam_urls(raw_urls: str) -> list[str]:
     return urls
 
 
-def fetch_steam_gallery_game(steamurl: str) -> SteamGalleryGame:
+def fetch_steam_gallery_game(steamurl: str, *, llm_enabled: bool = True) -> SteamGalleryGame:
     html = fetch_steam_page_html(steamurl)
     title = parse_steam_game_title(html)
     return SteamGalleryGame(
         steam_url=steamurl,
         name=title,
-        custom_text=generate_gallery_custom_text(title, steamurl),
+        custom_text=generate_gallery_custom_text(title, steamurl) if llm_enabled else "",
         photos=parse_steam_gallery_photos(html),
     )
 
