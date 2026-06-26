@@ -24,6 +24,7 @@ import paramiko
 import psycopg
 import requests
 import yt_dlp
+from PIL import Image, ImageDraw, ImageFont
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -33,6 +34,8 @@ from yt_dlp.utils import download_range_func
 SFTP_HOST = "vps38164.dreamhostps.com"
 SFTP_FOLDER = "efeefeoglu.com/steamboy"
 PUBLIC_VIDEO_BASE_URL = "https://efeefeoglu.com/steamboy"
+GALLERY_IMAGE_SFTP_FOLDER = f"{SFTP_FOLDER}/images"
+GALLERY_IMAGE_PUBLIC_BASE_URL = f"{PUBLIC_VIDEO_BASE_URL}/images"
 GALLERY_IMAGE_WIDTH = 1080
 GALLERY_IMAGE_HEIGHT = 1920
 GALLERY_IMAGE_TILE_HEIGHT = 760
@@ -1676,7 +1679,7 @@ def create_and_share_gallery_images(games: list[SteamGalleryGame]) -> list[Galle
             filename = build_gallery_image_filename(game.name)
             image_path = tmp_dir / filename
             create_gallery_image_file(game, image_path)
-            uploaded = upload_to_sftp(image_path, filename)
+            uploaded = upload_gallery_image_to_sftp(image_path, filename)
             posts = [create_buffer_image_post(channel, build_gallery_post_text(game), uploaded.public_url) for channel in list_tiktok_buffer_channels()]
             shares.append(GalleryImageShare(game_name=game.name, filename=filename, public_url=uploaded.public_url, posts=posts))
     return shares
@@ -1736,67 +1739,119 @@ def build_gallery_image_filename(game_name: str) -> str:
     return f"{sanitize_video_filename_stem(game_name)}-gallery-{timestamp}.png"
 
 
+def upload_gallery_image_to_sftp(file_path: Path, filename: str) -> SftpUploadResponse:
+    return upload_to_sftp_folder(file_path, filename, GALLERY_IMAGE_SFTP_FOLDER, GALLERY_IMAGE_PUBLIC_BASE_URL)
+
+
 def create_gallery_image_file(game: SteamGalleryGame, destination: Path) -> None:
-    ensure_ffmpeg()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="gallery-image-inputs-", dir=destination.parent) as tmp:
-        tmp_dir = Path(tmp)
-        image_paths = [download_gallery_image_file(photo_url, tmp_dir / f"tile-{index}.img") for index, photo_url in enumerate(game.photos[:4])]
-        if len(image_paths) != 4:
-            raise HTTPException(status_code=400, detail="Exactly four gallery photos are required.")
-        filter_graph = build_gallery_ffmpeg_filter(game.name, game.custom_text)
-        command = [get_ffmpeg_executable(), "-y"]
-        for image_path in image_paths:
-            command.extend(["-i", str(image_path)])
-        command.extend(["-filter_complex", filter_graph, "-frames:v", "1", str(destination)])
-        completed = subprocess.run(command, capture_output=True, text=True, check=False, env=ffmpeg_environment(command[0]))
-        if completed.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"ffmpeg gallery image generation failed: {completed.stderr[-1000:]}")
+    canvas = Image.new("RGB", (GALLERY_IMAGE_WIDTH, GALLERY_IMAGE_HEIGHT), "#020617")
+    tile_width = GALLERY_IMAGE_WIDTH // 2
+    for index, photo_url in enumerate(game.photos[:4]):
+        tile = download_gallery_image_tile(photo_url)
+        tile = cover_resize(tile, tile_width, GALLERY_IMAGE_TILE_HEIGHT)
+        x = (index % 2) * tile_width
+        y = (index // 2) * GALLERY_IMAGE_TILE_HEIGHT
+        canvas.paste(tile, (x, y))
+    draw_gallery_text_overlay(canvas, game.name, game.custom_text)
+    canvas.save(destination, format="PNG", optimize=True)
 
 
-def download_gallery_image_file(photo_url: str, destination: Path) -> Path:
+def download_gallery_image_tile(photo_url: str) -> Image.Image:
     try:
         response = requests.get(photo_url, headers={"User-Agent": "Steamboy/0.1 (+https://store.steampowered.com/)"}, timeout=30)
         response.raise_for_status()
-        destination.write_bytes(response.content)
-        return destination
-    except requests.RequestException as exc:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".img") as image_file:
+            image_file.write(response.content)
+            image_path = Path(image_file.name)
+        try:
+            with Image.open(image_path) as image:
+                return image.convert("RGB")
+        finally:
+            image_path.unlink(missing_ok=True)
+    except (requests.RequestException, OSError) as exc:
         raise HTTPException(status_code=502, detail=f"Could not download gallery image: {exc}") from exc
 
 
-def build_gallery_ffmpeg_filter(game_name: str, custom_text: str) -> str:
-    tile_width = GALLERY_IMAGE_WIDTH // 2
-    scaled_tiles = ";".join(
-        f"[{index}:v]scale={tile_width}:{GALLERY_IMAGE_TILE_HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={tile_width}:{GALLERY_IMAGE_TILE_HEIGHT},setsar=1[t{index}]"
-        for index in range(4)
-    )
-    title = escape_ffmpeg_drawtext(game_name)
-    body = escape_ffmpeg_drawtext(custom_text)
-    return (
-        f"{scaled_tiles};"
-        "[t0][t1]hstack=inputs=2[top];"
-        "[t2][t3]hstack=inputs=2[bottom];"
-        "[top][bottom]vstack=inputs=2[grid];"
-        f"color=c=#020617:s={GALLERY_IMAGE_WIDTH}x{GALLERY_IMAGE_HEIGHT}[base];"
-        "[base][grid]overlay=0:0[withgrid];"
-        f"[withgrid]drawbox=x=0:y=0:w={GALLERY_IMAGE_WIDTH}:h={GALLERY_IMAGE_HEIGHT}:color=black@0.28:t=fill,"
-        f"drawtext=fontfile={get_gallery_font_path()}:text='{title}':fontcolor=white:fontsize=86:"
-        "borderw=5:bordercolor=black@0.85:x=(w-text_w)/2:y=h*0.62,"
-        f"drawtext=fontfile={get_gallery_font_path()}:text='{body}':fontcolor=white:fontsize=42:"
-        "borderw=4:bordercolor=black@0.85:x=(w-text_w)/2:y=h*0.70"
-    )
+def cover_resize(image: Image.Image, width: int, height: int) -> Image.Image:
+    source_width, source_height = image.size
+    scale = max(width / source_width, height / source_height)
+    resized = image.resize((round(source_width * scale), round(source_height * scale)), Image.Resampling.LANCZOS)
+    left = max(0, (resized.width - width) // 2)
+    top = max(0, (resized.height - height) // 2)
+    return resized.crop((left, top, left + width, top + height))
 
 
-def get_gallery_font_path() -> str:
-    for font_path in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"):
+def draw_gallery_text_overlay(canvas: Image.Image, game_name: str, custom_text: str) -> None:
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    fade_start = GALLERY_IMAGE_TILE_HEIGHT
+    fade_distance = max(1, GALLERY_IMAGE_HEIGHT - fade_start)
+    for y in range(canvas.height):
+        alpha = int(max(0, min(190, (y - fade_start) / fade_distance * 190)))
+        if alpha:
+            overlay_draw.line([(0, y), (canvas.width, y)], fill=(2, 6, 23, alpha))
+    canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB"))
+
+    draw = ImageDraw.Draw(canvas)
+    title_font = load_gallery_font(92)
+    body_font = load_gallery_font(46)
+    y = int(canvas.height * 0.61)
+    y = draw_centered_wrapped_text(draw, game_name, title_font, y, fill="white", max_width=int(canvas.width * 0.86), line_spacing=8)
+    draw_centered_wrapped_text(draw, custom_text, body_font, y + 28, fill="#f8fafc", max_width=int(canvas.width * 0.82), line_spacing=10)
+
+
+def load_gallery_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for font_path in (
+        "/var/task/.fonts/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ):
         if Path(font_path).exists():
-            return font_path
-    return ""
+            return ImageFont.truetype(font_path, size=size)
+    return ImageFont.load_default()
 
 
-def escape_ffmpeg_drawtext(text: str) -> str:
-    return text.replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'").replace("%", r"\%").replace("\n", " ")[:180]
+def draw_centered_wrapped_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    y: int,
+    *,
+    fill: str,
+    max_width: int,
+    line_spacing: int,
+) -> int:
+    for line in wrap_gallery_text(draw, text, font, max_width):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        x = (GALLERY_IMAGE_WIDTH - text_width) // 2
+        for dx, dy in ((-3, -3), (3, -3), (-3, 3), (3, 3), (0, 4)):
+            draw.text((x + dx, y + dy), line, font=font, fill="black")
+        draw.text((x, y), line, font=font, fill=fill)
+        y += text_height + line_spacing
+    return y
+
+
+def wrap_gallery_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, max_width: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        bbox = draw.textbbox((0, 0), candidate, font=font)
+        if current and bbox[2] - bbox[0] > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
 
 def parse_gallery_steam_urls(raw_urls: str) -> list[str]:
     urls = [line.strip() for line in raw_urls.splitlines() if line.strip()]
@@ -2374,17 +2429,21 @@ def convert_to_vertical(source: Path, destination: Path) -> None:
 
 
 def upload_to_sftp(file_path: Path, filename: str) -> SftpUploadResponse:
+    return upload_to_sftp_folder(file_path, filename, SFTP_FOLDER, PUBLIC_VIDEO_BASE_URL)
+
+
+def upload_to_sftp_folder(file_path: Path, filename: str, remote_folder: str, public_base_url: str) -> SftpUploadResponse:
     username = os.getenv("SFTP_USER")
     password = os.getenv("SFTP_PASS")
     if not username or not password:
         raise HTTPException(status_code=500, detail="SFTP credentials are not configured. Set SFTP_USER and SFTP_PASS.")
 
-    remote_path = f"{SFTP_FOLDER}/{filename}"
+    remote_path = f"{remote_folder}/{filename}"
     try:
         transport = paramiko.Transport((SFTP_HOST, 22))
         transport.connect(username=username, password=password)
         with paramiko.SFTPClient.from_transport(transport) as sftp:
-            ensure_remote_directory(sftp, SFTP_FOLDER)
+            ensure_remote_directory(sftp, remote_folder)
             sftp.put(str(file_path), remote_path, confirm=True)
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"SFTP upload failed: {exc}") from exc
@@ -2394,7 +2453,7 @@ def upload_to_sftp(file_path: Path, filename: str) -> SftpUploadResponse:
         if "transport" in locals():
             transport.close()
 
-    return SftpUploadResponse(host=SFTP_HOST, path=remote_path, filename=filename, public_url=build_public_video_url(filename))
+    return SftpUploadResponse(host=SFTP_HOST, path=remote_path, filename=filename, public_url=f"{public_base_url}/{filename}")
 
 
 def ensure_remote_directory(sftp: paramiko.SFTPClient, remote_directory: str) -> None:
