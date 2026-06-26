@@ -1542,14 +1542,16 @@ def parse_steam_game_title(html: str) -> str:
 
 
 def parse_steam_gallery_photos(html: str) -> list[str]:
+    print("getting gallery")
+    print(html)
     photos: list[str] = []
     parser = SteamGalleryPhotoParser()
     parser.feed(html)
     for raw_url in parser.photos:
+        print("raw_url")
         photo = normalize_steam_gallery_photo_url(raw_url)
         if photo and photo not in photos:
             photos.append(photo)
-            console.log(photo)
             print(photo)
 
     if photos:
@@ -1720,7 +1722,6 @@ class SteamGalleryPhotoParser(HTMLParser):
             attributes = dict(attrs)
             if not self._is_smaller_than_gallery_minimum(attributes):
                 photo = self._get_image_url(attributes)
-                console.log(photo)
                 print(photo)
                 if photo and photo not in self.photos:
                     self.photos.append(photo)
