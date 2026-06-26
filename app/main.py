@@ -1535,8 +1535,6 @@ def fetch_steam_page_html(steamurl: str) -> str:
 def parse_steam_game_title(html: str) -> str:
     parser = SteamTitleParser()
     parser.feed(html)
-
-    console.log(parser.title)
     print(parser.title)
     if not parser.title:
         raise HTTPException(status_code=400, detail="Could not find Steam game title on store page")
