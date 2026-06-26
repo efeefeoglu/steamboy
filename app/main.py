@@ -33,6 +33,9 @@ from yt_dlp.utils import download_range_func
 SFTP_HOST = "vps38164.dreamhostps.com"
 SFTP_FOLDER = "efeefeoglu.com/steamboy"
 PUBLIC_VIDEO_BASE_URL = "https://efeefeoglu.com/steamboy"
+GALLERY_IMAGE_WIDTH = 1080
+GALLERY_IMAGE_HEIGHT = 1920
+GALLERY_IMAGE_TILE_HEIGHT = 760
 SEGMENT_SECONDS = 4
 MAX_SEGMENTS = 10
 MAX_MERGED_DURATION_SECONDS = SEGMENT_SECONDS * MAX_SEGMENTS
@@ -83,6 +86,13 @@ class SteamGalleryGame(BaseModel):
     name: str
     custom_text: str
     photos: list[str]
+
+
+class GalleryImageShare(BaseModel):
+    game_name: str
+    filename: str
+    public_url: str
+    posts: list[BufferSharePost]
 
 
 class BufferChannel(BaseModel):
@@ -594,7 +604,8 @@ def build_gallery(steamurls: Annotated[str, Form()], llm_enabled: Annotated[bool
 @app.post("/gallery/submit", response_class=HTMLResponse)
 async def submit_gallery(request: Request) -> HTMLResponse:
     games = parse_gallery_submission(await request.form())
-    return render_gallery_submission(games)
+    shares = create_and_share_gallery_images(games)
+    return render_gallery_submission(games, shares)
 
 
 @app.get("/youtube/login", response_class=HTMLResponse)
@@ -1603,8 +1614,9 @@ def parse_gallery_submission(form_data: Any) -> list[SteamGalleryGame]:
     return games
 
 
-def render_gallery_submission(games: list[SteamGalleryGame]) -> HTMLResponse:
-    items = "\n".join(render_gallery_merged_image(game) for game in games)
+def render_gallery_submission(games: list[SteamGalleryGame], shares: list[GalleryImageShare]) -> HTMLResponse:
+    items = "\n".join(render_gallery_merged_image(game, shares[index] if index < len(shares) else None) for index, game in enumerate(games))
+    share_count = sum(len(share.posts) for share in shares)
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
@@ -1620,7 +1632,7 @@ def render_gallery_submission(games: list[SteamGalleryGame]) -> HTMLResponse:
     <header>
       <p class="eyebrow">Gallery ready</p>
       <h1>Merged gallery images</h1>
-      <p>Each game is rendered as a square 2×2 image grid with the game name centered horizontally at 65% vertical position and the custom text below it.</p>
+      <p>Created one 1080×1920 merged image per game and scheduled {share_count} TikTok Buffer post{("" if share_count == 1 else "s")}.</p>
     </header>
     <div class="merged-gallery-list">{items}</div>
   </main>
@@ -1629,11 +1641,15 @@ def render_gallery_submission(games: list[SteamGalleryGame]) -> HTMLResponse:
     )
 
 
-def render_gallery_merged_image(game: SteamGalleryGame) -> str:
+def render_gallery_merged_image(game: SteamGalleryGame, share: GalleryImageShare | None = None) -> str:
     photos = "\n".join(
         f'<img src="{escape(photo, quote=True)}" alt="{escape(game.name, quote=True)} gallery image {index + 1}" loading="lazy">'
         for index, photo in enumerate(game.photos[:4])
     )
+    share_link = ""
+    if share:
+        escaped_url = escape(share.public_url, quote=True)
+        share_link = f'<p><a href="{escaped_url}" target="_blank" rel="noreferrer">Download generated image</a> · Scheduled {len(share.posts)} TikTok post{("" if len(share.posts) == 1 else "s")}</p>'
     return f"""<article class="merged-gallery-card">
   <div class="merged-image" aria-label="Merged 2 by 2 gallery image for {escape(game.name, quote=True)}">
     <div class="merged-grid">{photos}</div>
@@ -1642,8 +1658,145 @@ def render_gallery_merged_image(game: SteamGalleryGame) -> str:
       <p>{escape(game.custom_text)}</p>
     </div>
   </div>
+  {share_link}
 </article>"""
 
+
+def create_and_share_gallery_images(games: list[SteamGalleryGame]) -> list[GalleryImageShare]:
+    if not games:
+        return []
+    if not os.getenv("BUFFER_TIKTOK_PROFILE_ID"):
+        raise HTTPException(status_code=500, detail="TikTok sharing is not configured. Set BUFFER_TIKTOK_PROFILE_ID.")
+    work_root = Path(os.getenv("WORK_DIR", "/tmp/steamboy"))
+    work_root.mkdir(parents=True, exist_ok=True)
+    shares: list[GalleryImageShare] = []
+    with tempfile.TemporaryDirectory(prefix="steam-gallery-", dir=work_root) as tmp:
+        tmp_dir = Path(tmp)
+        for game in games:
+            filename = build_gallery_image_filename(game.name)
+            image_path = tmp_dir / filename
+            create_gallery_image_file(game, image_path)
+            uploaded = upload_to_sftp(image_path, filename)
+            posts = [create_buffer_image_post(channel, build_gallery_post_text(game), uploaded.public_url) for channel in list_tiktok_buffer_channels()]
+            shares.append(GalleryImageShare(game_name=game.name, filename=filename, public_url=uploaded.public_url, posts=posts))
+    return shares
+
+
+def list_tiktok_buffer_channels() -> list[BufferChannel]:
+    profile_id = os.getenv("BUFFER_TIKTOK_PROFILE_ID")
+    return [BufferChannel(id=profile_id, service="tiktok")] if profile_id else []
+
+
+def build_gallery_post_text(game: SteamGalleryGame) -> str:
+    return f"{game.name}\n\n{game.custom_text}".strip()
+
+
+def create_buffer_image_post(channel: BufferChannel, text: str, image_url: str) -> BufferSharePost:
+    data = buffer_graphql_request(
+        """
+        mutation CreateScheduledImagePost($input: CreatePostInput!) {
+          createPost(input: $input) {
+            ... on PostActionSuccess {
+              post {
+                id
+                channelId
+                dueAt
+              }
+            }
+            ... on MutationError {
+              message
+            }
+          }
+        }
+        """,
+        {
+            "input": {
+                "text": text,
+                "channelId": channel.id,
+                "schedulingType": "automatic",
+                "mode": "addToQueue",
+                "metadata": build_buffer_post_metadata(channel.service, build_buffer_video_title(text)),
+                "assets": [{"image": {"url": image_url}}],
+            }
+        },
+    )
+    result = data.get("createPost")
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="Buffer returned an invalid createPost payload")
+    if result.get("message"):
+        raise HTTPException(status_code=502, detail=f"Buffer could not schedule {channel.service}: {result['message']}")
+    post = result.get("post")
+    if not isinstance(post, dict) or not post.get("id"):
+        raise HTTPException(status_code=502, detail=f"Buffer did not return a scheduled post for {channel.service}")
+    return BufferSharePost(id=str(post["id"]), channel_id=str(post.get("channelId") or channel.id), channel_name=channel.name, service=channel.service, due_at=post.get("dueAt"))
+
+
+def build_gallery_image_filename(game_name: str) -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    return f"{sanitize_video_filename_stem(game_name)}-gallery-{timestamp}.png"
+
+
+def create_gallery_image_file(game: SteamGalleryGame, destination: Path) -> None:
+    ensure_ffmpeg()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="gallery-image-inputs-", dir=destination.parent) as tmp:
+        tmp_dir = Path(tmp)
+        image_paths = [download_gallery_image_file(photo_url, tmp_dir / f"tile-{index}.img") for index, photo_url in enumerate(game.photos[:4])]
+        if len(image_paths) != 4:
+            raise HTTPException(status_code=400, detail="Exactly four gallery photos are required.")
+        filter_graph = build_gallery_ffmpeg_filter(game.name, game.custom_text)
+        command = [get_ffmpeg_executable(), "-y"]
+        for image_path in image_paths:
+            command.extend(["-i", str(image_path)])
+        command.extend(["-filter_complex", filter_graph, "-frames:v", "1", str(destination)])
+        completed = subprocess.run(command, capture_output=True, text=True, check=False, env=ffmpeg_environment(command[0]))
+        if completed.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"ffmpeg gallery image generation failed: {completed.stderr[-1000:]}")
+
+
+def download_gallery_image_file(photo_url: str, destination: Path) -> Path:
+    try:
+        response = requests.get(photo_url, headers={"User-Agent": "Steamboy/0.1 (+https://store.steampowered.com/)"}, timeout=30)
+        response.raise_for_status()
+        destination.write_bytes(response.content)
+        return destination
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Could not download gallery image: {exc}") from exc
+
+
+def build_gallery_ffmpeg_filter(game_name: str, custom_text: str) -> str:
+    tile_width = GALLERY_IMAGE_WIDTH // 2
+    scaled_tiles = ";".join(
+        f"[{index}:v]scale={tile_width}:{GALLERY_IMAGE_TILE_HEIGHT}:force_original_aspect_ratio=increase,"
+        f"crop={tile_width}:{GALLERY_IMAGE_TILE_HEIGHT},setsar=1[t{index}]"
+        for index in range(4)
+    )
+    title = escape_ffmpeg_drawtext(game_name)
+    body = escape_ffmpeg_drawtext(custom_text)
+    return (
+        f"{scaled_tiles};"
+        "[t0][t1]hstack=inputs=2[top];"
+        "[t2][t3]hstack=inputs=2[bottom];"
+        "[top][bottom]vstack=inputs=2[grid];"
+        f"color=c=#020617:s={GALLERY_IMAGE_WIDTH}x{GALLERY_IMAGE_HEIGHT}[base];"
+        "[base][grid]overlay=0:0[withgrid];"
+        f"[withgrid]drawbox=x=0:y=0:w={GALLERY_IMAGE_WIDTH}:h={GALLERY_IMAGE_HEIGHT}:color=black@0.28:t=fill,"
+        f"drawtext=fontfile={get_gallery_font_path()}:text='{title}':fontcolor=white:fontsize=86:"
+        "borderw=5:bordercolor=black@0.85:x=(w-text_w)/2:y=h*0.62,"
+        f"drawtext=fontfile={get_gallery_font_path()}:text='{body}':fontcolor=white:fontsize=42:"
+        "borderw=4:bordercolor=black@0.85:x=(w-text_w)/2:y=h*0.70"
+    )
+
+
+def get_gallery_font_path() -> str:
+    for font_path in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"):
+        if Path(font_path).exists():
+            return font_path
+    return ""
+
+
+def escape_ffmpeg_drawtext(text: str) -> str:
+    return text.replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'").replace("%", r"\%").replace("\n", " ")[:180]
 
 def parse_gallery_steam_urls(raw_urls: str) -> list[str]:
     urls = [line.strip() for line in raw_urls.splitlines() if line.strip()]

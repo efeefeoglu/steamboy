@@ -19,7 +19,7 @@ Set the following environment variables for SFTP authentication:
 - `NEON_DB_URL`: Neon Postgres connection URL used by the dashboard
 - `OPENAI_API_KEY`: API key used by the Review button to generate social posts
 - `BUFFER_API_KEY`: API key used by the Share button to schedule generated videos on Buffer
-- `BUFFER_TIKTOK_PROFILE_ID`: optional Buffer profile/channel ID for TikTok sharing
+- `BUFFER_TIKTOK_PROFILE_ID`: optional Buffer profile/channel ID for TikTok sharing, including gallery image posts
 - `BUFFER_INSTAGRAM_PROFILE_ID`: optional Buffer profile/channel ID for Instagram sharing
 - `YOUTUBE_CLIENT_ID`: Google OAuth client ID used by `/youtube/login`
 - `YOUTUBE_CLIENT_SECRET`: Google OAuth client secret used only by the backend token exchange
@@ -71,9 +71,10 @@ The dashboard supports:
 - Showing the latest run time as a relative timestamp and showing a Video button when the `video` field has a value
 - Deleting saved Steam store URLs
 - Scheduling the uploaded video through Buffer on the configured TikTok and Instagram profile IDs
+- Building one merged 1080×1920 gallery image per game from four selected Steam screenshots and sharing those images to TikTok through Buffer
 - Connecting YouTube at `/youtube/login` and uploading the video directly to YouTube as an unlisted video when a stored OAuth token or the development `YOUTUBE_ACCESS_TOKEN` fallback is configured
 
-If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error. The Review button sends the Steam URL to the configured OpenAI model with the prompt: `Write a short casual social media reaction/review post with: a short title, a post body.` The Share button requires a previously generated video. It adds one Buffer post to the queue for each configured `BUFFER_TIKTOK_PROFILE_ID` and `BUFFER_INSTAGRAM_PROFILE_ID`, and uploads one direct YouTube API video when YouTube OAuth is connected or the development `YOUTUBE_ACCESS_TOKEN` fallback is configured. The Buffer scheduled post text uses only the saved review body; the video is attached as a Buffer asset. Direct YouTube uploads use the saved review body as the description, the Gaming category, and `privacyStatus: "unlisted"`.
+If `NEON_DB_URL` is missing or Neon is unavailable, the root page still renders the dashboard with a warning instead of returning a JSON error. The Review button sends the Steam URL to the configured OpenAI model with the prompt: `Write a short casual social media reaction/review post with: a short title, a post body.` The Share button requires a previously generated video. It adds one Buffer post to the queue for each configured `BUFFER_TIKTOK_PROFILE_ID` and `BUFFER_INSTAGRAM_PROFILE_ID`, and uploads one direct YouTube API video when YouTube OAuth is connected or the development `YOUTUBE_ACCESS_TOKEN` fallback is configured. The Buffer scheduled post text uses only the saved review body; the video is attached as a Buffer asset. Gallery image sharing requires `BUFFER_API_KEY`, `BUFFER_TIKTOK_PROFILE_ID`, and SFTP credentials so the generated PNG files can be uploaded publicly before Buffer schedules them. Direct YouTube uploads use the saved review body as the description, the Gaming category, and `privacyStatus: "unlisted"`.
 
 
 ### YouTube OAuth
