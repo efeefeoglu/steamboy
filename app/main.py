@@ -1546,8 +1546,9 @@ def parse_steam_gallery_photos(html: str) -> list[str]:
     photos: list[str] = []
     parser = SteamGalleryPhotoParser()
     parser.feed(html)
+    print(parser.photos)
     for raw_url in parser.photos:
-        print("raw_url")
+        print(raw_url)
         photo = normalize_steam_gallery_photo_url(raw_url)
         if photo and photo not in photos:
             photos.append(photo)
