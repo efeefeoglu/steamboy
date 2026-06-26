@@ -9,3 +9,4 @@ yt-dlp==2026.6.9
 psycopg[binary]==3.2.9
 
 cryptography==45.0.4
+Pillow==11.2.1
