@@ -1441,6 +1441,8 @@ def render_gallery_step_two(games: list[SteamGalleryGame]) -> HTMLResponse:
       <p>Review the grabbed game names, tweak the generated custom text, and select exactly four photos per game.</p>
     </header>
     <form method="post" action="/gallery/submit" id="gallery-review-form">
+      <label for="gallery-description">Description</label>
+      <input id="gallery-description" name="description" type="text" placeholder="Add a short description for this gallery">
       <div class="game-list">{cards}</div>
       <button type="submit">Create merged images</button>
     </form>
