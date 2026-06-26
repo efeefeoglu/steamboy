@@ -1442,7 +1442,7 @@ def render_gallery_step_two(games: list[SteamGalleryGame]) -> HTMLResponse:
     </header>
     <form method="post" action="/gallery/submit" id="gallery-review-form">
       <div class="game-list">{cards}</div>
-      <button type="submit">Save gallery selections</button>
+      <button type="submit">Create merged images</button>
     </form>
   </main>
   <script>
@@ -1541,6 +1541,15 @@ def render_gallery_styles() -> str:
     .photo-option input { left: 12px; position: absolute; top: 12px; transform: scale(1.3); z-index: 1; }
     .photo-option:has(input:checked) { border-color: #5eead4; box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.14); }
     .form-error { background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(248, 113, 113, 0.35); border-radius: 14px; color: #fecaca; font-weight: 800; margin: 0 0 18px; padding: 12px 14px; }
+    .merged-gallery-list { display: grid; gap: 28px; margin-top: 28px; }
+    .merged-gallery-card { background: rgba(15, 23, 42, 0.78); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35); margin: 0; overflow: hidden; padding: 14px; }
+    .merged-image { aspect-ratio: 1 / 1; background: #020617; border-radius: 18px; overflow: hidden; position: relative; width: 100%; }
+    .merged-grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); height: 100%; width: 100%; }
+    .merged-grid img { aspect-ratio: 1 / 1; height: 100%; object-fit: cover; width: 100%; }
+    .merged-image::after { background: linear-gradient(180deg, transparent 20%, rgba(2, 6, 23, 0.1) 46%, rgba(2, 6, 23, 0.54) 100%); content: ""; inset: 0; position: absolute; }
+    .merged-text { left: 50%; padding: 0 7%; position: absolute; text-align: center; text-shadow: 0 4px 16px rgba(0, 0, 0, 0.95), 0 1px 3px rgba(0, 0, 0, 0.9); top: 65%; transform: translate(-50%, -50%); width: 100%; z-index: 1; }
+    .merged-text h2 { color: #fff; font-size: clamp(2rem, 8vw, 5.5rem); letter-spacing: -0.06em; line-height: 0.95; margin: 0; text-wrap: balance; }
+    .merged-text p { color: #f8fafc; font-size: clamp(1rem, 3vw, 2rem); font-weight: 900; line-height: 1.18; margin: 0.45em auto 0; max-width: 88%; text-wrap: balance; }
     .success-list { display: grid; gap: 14px; margin: 24px 0; padding: 0; }
     .success-list li { background: rgba(20, 184, 166, 0.14); border: 1px solid rgba(94, 234, 212, 0.28); border-radius: 16px; list-style: none; padding: 14px 16px; }
     img { aspect-ratio: 16 / 9; display: block; object-fit: cover; width: 100%; }
@@ -1593,17 +1602,14 @@ def parse_gallery_submission(form_data: Any) -> list[SteamGalleryGame]:
 
 
 def render_gallery_submission(games: list[SteamGalleryGame]) -> HTMLResponse:
-    items = "\n".join(
-        f"<li><strong>{escape(game.name)}</strong>: {len(game.photos)} photos selected<br><span>{escape(game.custom_text)}</span></li>"
-        for game in games
-    )
+    items = "\n".join(render_gallery_merged_image(game) for game in games)
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Steamboy Gallery Saved</title>
+  <title>Steamboy Gallery Images</title>
   {render_gallery_styles()}
 </head>
 <body>
@@ -1611,14 +1617,30 @@ def render_gallery_submission(games: list[SteamGalleryGame]) -> HTMLResponse:
     <nav><a href="/gallery">← Build another gallery</a> <a href="/">Dashboard</a></nav>
     <header>
       <p class="eyebrow">Gallery ready</p>
-      <h1>Selections validated</h1>
-      <p>Every game has a name, custom text, and exactly four selected photos.</p>
+      <h1>Merged gallery images</h1>
+      <p>Each game is rendered as a square 2×2 image grid with the game name centered horizontally at 65% vertical position and the custom text below it.</p>
     </header>
-    <ul class="success-list">{items}</ul>
+    <div class="merged-gallery-list">{items}</div>
   </main>
 </body>
 </html>"""
     )
+
+
+def render_gallery_merged_image(game: SteamGalleryGame) -> str:
+    photos = "\n".join(
+        f'<img src="{escape(photo, quote=True)}" alt="{escape(game.name, quote=True)} gallery image {index + 1}" loading="lazy">'
+        for index, photo in enumerate(game.photos[:4])
+    )
+    return f"""<article class="merged-gallery-card">
+  <div class="merged-image" aria-label="Merged 2 by 2 gallery image for {escape(game.name, quote=True)}">
+    <div class="merged-grid">{photos}</div>
+    <div class="merged-text">
+      <h2>{escape(game.name)}</h2>
+      <p>{escape(game.custom_text)}</p>
+    </div>
+  </div>
+</article>"""
 
 
 def parse_gallery_steam_urls(raw_urls: str) -> list[str]:
