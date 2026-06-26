@@ -1549,6 +1549,7 @@ def parse_steam_gallery_photos(html: str) -> list[str]:
         if photo and photo not in photos:
             photos.append(photo)
             console.log(photo)
+            print(photo)
 
     if photos:
         return photos[:24]
@@ -1718,6 +1719,7 @@ class SteamGalleryPhotoParser(HTMLParser):
             attributes = dict(attrs)
             if not self._is_smaller_than_gallery_minimum(attributes):
                 photo = self._get_image_url(attributes)
+                console.
                 if photo and photo not in self.photos:
                     self.photos.append(photo)
 
