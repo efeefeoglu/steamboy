@@ -1548,6 +1548,7 @@ def parse_steam_gallery_photos(html: str) -> list[str]:
         photo = normalize_steam_gallery_photo_url(raw_url)
         if photo and photo not in photos:
             photos.append(photo)
+            console.log(photo)
 
     if photos:
         return photos[:24]
