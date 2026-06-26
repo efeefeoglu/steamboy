@@ -1542,7 +1542,6 @@ def parse_steam_game_title(html: str) -> str:
 
 
 def parse_steam_gallery_photos(html: str) -> list[str]:
-    print("getting gallery")
     photos: list[str] = []
     for candidate_html in iter_gallery_html_candidates(html):
         parser = SteamGalleryPhotoParser()
@@ -1723,9 +1722,8 @@ class SteamGalleryPhotoParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = dict(attrs)
         if tag == "div" and self._is_highlight_overflow(attributes):
-            print("handle_starttag")
-            print(attrs)
             self._highlight_depth += 1
+            self._add_data_props_photos(attributes)
             return
         if self._highlight_depth and tag == "div":
             self._highlight_depth += 1
@@ -1752,16 +1750,21 @@ class SteamGalleryPhotoParser(HTMLParser):
         classes = (attributes.get("class") or "").split()
         return "highlight_overflow" in classes
 
+    def _add_data_props_photos(self, attributes: dict[str, str | None]) -> None:
+        props = parse_steam_gallery_data_props(attributes.get("data-props"))
+        for screenshot in props.get("screenshots", []):
+            if not isinstance(screenshot, dict):
+                continue
+            photo = screenshot.get("full") or screenshot.get("standard") or screenshot.get("thumbnail")
+            if isinstance(photo, str) and photo not in self.photos:
+                self.photos.append(photo)
+
     @staticmethod
     def _get_image_url(attributes: dict[str, str | None]) -> str | None:
-        print("_get_image_url")
-        print(attributes)
-        print(attributes.get("src"))
         return attributes.get("src") or attributes.get("data-src") or attributes.get("data-original")
 
     @staticmethod
     def _is_smaller_than_gallery_minimum(attributes: dict[str, str | None]) -> bool:
-        print("_is_smaller_than_gallery_minimum")
         width = parse_image_dimension(attributes.get("width"))
         height = parse_image_dimension(attributes.get("height"))
         photo = SteamGalleryPhotoParser._get_image_url(attributes)
@@ -1770,6 +1773,17 @@ class SteamGalleryPhotoParser(HTMLParser):
             width = width or url_width
             height = height or url_height
         return any(dimension is not None and dimension < 200 for dimension in (width, height))
+
+
+def parse_steam_gallery_data_props(raw_props: str | None) -> dict:
+    if not raw_props:
+        return {}
+    props = html_unescape(raw_props).replace("\\/", "/")
+    try:
+        parsed = json.loads(props)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def parse_image_dimension(value: str | None) -> int | None:
