@@ -37,8 +37,8 @@ PUBLIC_VIDEO_BASE_URL = "https://efeefeoglu.com/steamboy"
 GALLERY_IMAGE_SFTP_FOLDER = f"{SFTP_FOLDER}/images"
 GALLERY_IMAGE_PUBLIC_BASE_URL = f"{PUBLIC_VIDEO_BASE_URL}/images"
 GALLERY_IMAGE_WIDTH = 1080
-GALLERY_IMAGE_HEIGHT = 1920
-GALLERY_IMAGE_TILE_HEIGHT = 760
+GALLERY_IMAGE_HEIGHT = 1080
+GALLERY_IMAGE_TILE_HEIGHT = 540
 SEGMENT_SECONDS = 4
 MAX_SEGMENTS = 10
 MAX_MERGED_DURATION_SECONDS = SEGMENT_SECONDS * MAX_SEGMENTS
@@ -1819,6 +1819,8 @@ def draw_gallery_text_overlay(canvas: Image.Image, game_name: str, custom_text: 
 
     canvas.paste(Image.alpha_composite(background, text_layer).convert("RGB"))
 
+    canvas.paste(Image.alpha_composite(background, text_layer).convert("RGB"))
+
 
 def load_gallery_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     for font_path in (
@@ -1834,15 +1836,14 @@ def load_gallery_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont
 
 def draw_gallery_centered_wrapped_text(
     draw: ImageDraw.ImageDraw,
-    text: str,
+    lines: list[str],
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
     y: int,
     *,
     fill: str,
-    max_width: int,
     line_spacing: int,
 ) -> int:
-    for line in wrap_gallery_text(draw, text, font, max_width):
+    for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
