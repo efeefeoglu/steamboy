@@ -98,6 +98,11 @@ class GalleryImageShare(BaseModel):
     posts: list[BufferSharePost]
 
 
+class GallerySubmission(BaseModel):
+    description: str
+    games: list[SteamGalleryGame]
+
+
 class BufferChannel(BaseModel):
     id: str
     name: str | None = None
@@ -606,9 +611,9 @@ def build_gallery(steamurls: Annotated[str, Form()], llm_enabled: Annotated[bool
 
 @app.post("/gallery/submit", response_class=HTMLResponse)
 async def submit_gallery(request: Request) -> HTMLResponse:
-    games = parse_gallery_submission(await request.form())
-    shares = create_and_share_gallery_images(games)
-    return render_gallery_submission(games, shares)
+    submission = parse_gallery_submission(await request.form())
+    shares = create_and_share_gallery_images(submission.games, submission.description)
+    return render_gallery_submission(submission.games, shares)
 
 
 @app.get("/youtube/login", response_class=HTMLResponse)
@@ -1560,6 +1565,7 @@ def render_gallery_styles() -> str:
     .merged-gallery-list { display: grid; gap: 28px; margin-top: 28px; }
     .merged-gallery-card { background: rgba(15, 23, 42, 0.78); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35); margin: 0; overflow: hidden; padding: 14px; }
     .merged-image { aspect-ratio: 1 / 1; background: #020617; border-radius: 18px; overflow: hidden; position: relative; width: 100%; }
+    .generated-gallery-image { aspect-ratio: 9 / 16; border-radius: 18px; display: block; margin: 0 auto; max-height: 78vh; max-width: 100%; object-fit: contain; width: auto; }
     .merged-grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); height: 100%; width: 100%; }
     .merged-grid img { aspect-ratio: 1 / 1; height: 100%; object-fit: cover; width: 100%; }
     .merged-image::after { background: linear-gradient(180deg, transparent 20%, rgba(2, 6, 23, 0.1) 46%, rgba(2, 6, 23, 0.54) 100%); content: ""; inset: 0; position: absolute; }
@@ -1573,7 +1579,8 @@ def render_gallery_styles() -> str:
   </style>"""
 
 
-def parse_gallery_submission(form_data: Any) -> list[SteamGalleryGame]:
+def parse_gallery_submission(form_data: Any) -> GallerySubmission:
+    description = str(form_data.get("description", "")).strip()
     raw_games: dict[int, dict[str, Any]] = {}
     field_pattern = re.compile(r"^games\[(\d+)]\[(steam_url|name|custom_text|photos)]$")
     for key, value in form_data.multi_items():
@@ -1614,12 +1621,12 @@ def parse_gallery_submission(form_data: Any) -> list[SteamGalleryGame]:
 
     if errors:
         raise HTTPException(status_code=400, detail=" ".join(errors))
-    return games
+    return GallerySubmission(description=description, games=games)
 
 
 def render_gallery_submission(games: list[SteamGalleryGame], shares: list[GalleryImageShare]) -> HTMLResponse:
     items = "\n".join(render_gallery_merged_image(game, shares[index] if index < len(shares) else None) for index, game in enumerate(games))
-    share_count = sum(len(share.posts) for share in shares)
+    share_count = len(shares[0].posts) if shares else 0
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
@@ -1635,7 +1642,7 @@ def render_gallery_submission(games: list[SteamGalleryGame], shares: list[Galler
     <header>
       <p class="eyebrow">Gallery ready</p>
       <h1>Merged gallery images</h1>
-      <p>Created one 1080×1920 merged image per game and scheduled {share_count} TikTok Buffer post{("" if share_count == 1 else "s")}.</p>
+      <p>Created one 1080×1920 merged image per game and scheduled {share_count} TikTok Buffer gallery post{("" if share_count == 1 else "s")}.</p>
     </header>
     <div class="merged-gallery-list">{items}</div>
   </main>
@@ -1645,27 +1652,31 @@ def render_gallery_submission(games: list[SteamGalleryGame], shares: list[Galler
 
 
 def render_gallery_merged_image(game: SteamGalleryGame, share: GalleryImageShare | None = None) -> str:
-    photos = "\n".join(
-        f'<img src="{escape(photo, quote=True)}" alt="{escape(game.name, quote=True)} gallery image {index + 1}" loading="lazy">'
-        for index, photo in enumerate(game.photos[:4])
-    )
     share_link = ""
     if share:
         escaped_url = escape(share.public_url, quote=True)
-        share_link = f'<p><a href="{escaped_url}" target="_blank" rel="noreferrer">Download generated image</a> · Scheduled {len(share.posts)} TikTok post{("" if len(share.posts) == 1 else "s")}</p>'
-    return f"""<article class="merged-gallery-card">
-  <div class="merged-image" aria-label="Merged 2 by 2 gallery image for {escape(game.name, quote=True)}">
+        post_count = len(share.posts)
+        share_link = f'<p><a href="{escaped_url}" target="_blank" rel="noreferrer">Download generated image</a> · Included in {post_count} TikTok gallery post{("" if post_count == 1 else "s")}</p>'
+        image_markup = f'<img class="generated-gallery-image" src="{escaped_url}" alt="Generated gallery image for {escape(game.name, quote=True)}" loading="lazy">'
+    else:
+        photos = "\n".join(
+            f'<img src="{escape(photo, quote=True)}" alt="{escape(game.name, quote=True)} gallery image {index + 1}" loading="lazy">'
+            for index, photo in enumerate(game.photos[:4])
+        )
+        image_markup = f"""<div class="merged-image" aria-label="Merged 2 by 2 gallery image for {escape(game.name, quote=True)}">
     <div class="merged-grid">{photos}</div>
     <div class="merged-text">
       <h2>{escape(game.name)}</h2>
       <p>{escape(game.custom_text)}</p>
     </div>
-  </div>
+  </div>"""
+    return f"""<article class="merged-gallery-card">
+  {image_markup}
   {share_link}
 </article>"""
 
 
-def create_and_share_gallery_images(games: list[SteamGalleryGame]) -> list[GalleryImageShare]:
+def create_and_share_gallery_images(games: list[SteamGalleryGame], description: str) -> list[GalleryImageShare]:
     if not games:
         return []
     if not os.getenv("BUFFER_TIKTOK_PROFILE_ID"):
@@ -1680,8 +1691,11 @@ def create_and_share_gallery_images(games: list[SteamGalleryGame]) -> list[Galle
             image_path = tmp_dir / filename
             create_gallery_image_file(game, image_path)
             uploaded = upload_gallery_image_to_sftp(image_path, filename)
-            posts = [create_buffer_image_post(channel, build_gallery_post_text(game), uploaded.public_url) for channel in list_tiktok_buffer_channels()]
-            shares.append(GalleryImageShare(game_name=game.name, filename=filename, public_url=uploaded.public_url, posts=posts))
+            shares.append(GalleryImageShare(game_name=game.name, filename=filename, public_url=uploaded.public_url, posts=[]))
+        image_urls = [share.public_url for share in shares]
+        posts = [create_buffer_gallery_post(channel, description, image_urls) for channel in list_tiktok_buffer_channels()]
+        for share in shares:
+            share.posts = posts
     return shares
 
 
@@ -1690,11 +1704,13 @@ def list_tiktok_buffer_channels() -> list[BufferChannel]:
     return [BufferChannel(id=profile_id, service="tiktok")] if profile_id else []
 
 
-def build_gallery_post_text(game: SteamGalleryGame) -> str:
-    return f"{game.name}\n\n{game.custom_text}".strip()
-
-
 def create_buffer_image_post(channel: BufferChannel, text: str, image_url: str) -> BufferSharePost:
+    return create_buffer_gallery_post(channel, text, [image_url])
+
+
+def create_buffer_gallery_post(channel: BufferChannel, text: str, image_urls: list[str]) -> BufferSharePost:
+    if not image_urls:
+        raise HTTPException(status_code=400, detail="At least one gallery image is required.")
     data = buffer_graphql_request(
         """
         mutation CreateScheduledImagePost($input: CreatePostInput!) {
@@ -1718,8 +1734,8 @@ def create_buffer_image_post(channel: BufferChannel, text: str, image_url: str) 
                 "channelId": channel.id,
                 "schedulingType": "automatic",
                 "mode": "addToQueue",
-                "metadata": build_buffer_post_metadata(channel.service, build_buffer_video_title(text)),
-                "assets": [{"image": {"url": image_url}}],
+                "metadata": build_buffer_post_metadata(channel.service, build_buffer_video_title(text or "Steam gallery")),
+                "assets": [{"image": {"url": image_url}} for image_url in image_urls],
             }
         },
     )
