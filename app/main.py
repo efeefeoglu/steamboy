@@ -1721,10 +1721,10 @@ class SteamGalleryPhotoParser(HTMLParser):
         self.photos: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        print("handle_starttag")
-        print(attrs)
         attributes = dict(attrs)
         if tag == "div" and self._is_highlight_overflow(attributes):
+            print("handle_starttag")
+            print(attrs)
             self._highlight_depth += 1
             return
         if self._highlight_depth and tag == "div":
