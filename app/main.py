@@ -15,7 +15,7 @@ from html import escape, unescape as html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from uuid import uuid4
 
@@ -589,6 +589,12 @@ def build_gallery(steamurls: Annotated[str, Form()], llm_enabled: Annotated[bool
     urls = parse_gallery_steam_urls(steamurls)
     games = [fetch_steam_gallery_game(url, llm_enabled=llm_enabled) for url in urls]
     return render_gallery_step_two(games)
+
+
+@app.post("/gallery/submit", response_class=HTMLResponse)
+async def submit_gallery(request: Request) -> HTMLResponse:
+    games = parse_gallery_submission(await request.form())
+    return render_gallery_submission(games)
 
 
 @app.get("/youtube/login", response_class=HTMLResponse)
@@ -1434,19 +1440,44 @@ def render_gallery_step_two(games: list[SteamGalleryGame]) -> HTMLResponse:
       <h1>Choose your gallery shots</h1>
       <p>Review the grabbed game names, tweak the generated custom text, and select exactly four photos per game.</p>
     </header>
-    <form method="post" action="#">
+    <form method="post" action="/gallery/submit" id="gallery-review-form">
       <div class="game-list">{cards}</div>
-      <button type="submit" disabled>Output continues in the next phase</button>
+      <button type="submit">Save gallery selections</button>
     </form>
   </main>
   <script>
+    const form = document.querySelector('#gallery-review-form');
+
+    function validateGameCard(card) {{
+      const name = card.querySelector('[data-game-name]');
+      const customText = card.querySelector('[data-custom-text]');
+      const checked = card.querySelectorAll('[data-photo-checkbox]:checked');
+      const isValid = name.value.trim() && customText.value.trim() && checked.length === 4;
+      card.querySelector('[data-selected-count]').textContent = checked.length;
+      card.querySelector('[data-game-error]').hidden = Boolean(isValid);
+      return Boolean(isValid);
+    }}
+
     document.querySelectorAll('[data-photo-checkbox]').forEach((checkbox) => {{
       checkbox.addEventListener('change', () => {{
         const card = checkbox.closest('[data-game-card]');
         const checked = card.querySelectorAll('[data-photo-checkbox]:checked');
         if (checked.length > 4) checkbox.checked = false;
-        card.querySelector('[data-selected-count]').textContent = card.querySelectorAll('[data-photo-checkbox]:checked').length;
+        validateGameCard(card);
       }});
+    }});
+
+    document.querySelectorAll('[data-game-card] input[type="text"]').forEach((input) => {{
+      input.addEventListener('input', () => validateGameCard(input.closest('[data-game-card]')));
+    }});
+
+    form.addEventListener('submit', (event) => {{
+      const cards = Array.from(document.querySelectorAll('[data-game-card]'));
+      if (!cards.every(validateGameCard)) {{
+        event.preventDefault();
+        const firstInvalid = cards.find((card) => !validateGameCard(card));
+        firstInvalid?.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+      }}
     }});
   </script>
 </body>
@@ -1461,13 +1492,14 @@ def render_gallery_game_card(index: int, game: SteamGalleryGame) -> str:
     return f"""<section class="game-card" data-game-card>
   <input type="hidden" name="games[{index}][steam_url]" value="{escape(game.steam_url, quote=True)}">
   <label for="game-name-{index}">Name of the game</label>
-  <input id="game-name-{index}" name="games[{index}][name]" type="text" value="{escape(game.name, quote=True)}">
+  <input id="game-name-{index}" data-game-name name="games[{index}][name]" type="text" value="{escape(game.name, quote=True)}" required>
   <label for="custom-text-{index}">Custom text</label>
-  <input id="custom-text-{index}" name="games[{index}][custom_text]" type="text" value="{escape(game.custom_text, quote=True)}">
+  <input id="custom-text-{index}" data-custom-text name="games[{index}][custom_text]" type="text" value="{escape(game.custom_text, quote=True)}" required>
   <div class="gallery-heading">
     <label>Photo gallery</label>
     <span><strong data-selected-count>0</strong>/4 selected</span>
   </div>
+  <p class="form-error" data-game-error hidden>Name, custom text, and exactly four photos are required for this game.</p>
   <div class="photo-grid">{photos}</div>
 </section>"""
 
@@ -1508,9 +1540,85 @@ def render_gallery_styles() -> str:
     .photo-option { border: 2px solid rgba(148, 163, 184, 0.25); border-radius: 18px; cursor: pointer; margin: 0; overflow: hidden; position: relative; }
     .photo-option input { left: 12px; position: absolute; top: 12px; transform: scale(1.3); z-index: 1; }
     .photo-option:has(input:checked) { border-color: #5eead4; box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.14); }
+    .form-error { background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(248, 113, 113, 0.35); border-radius: 14px; color: #fecaca; font-weight: 800; margin: 0 0 18px; padding: 12px 14px; }
+    .success-list { display: grid; gap: 14px; margin: 24px 0; padding: 0; }
+    .success-list li { background: rgba(20, 184, 166, 0.14); border: 1px solid rgba(94, 234, 212, 0.28); border-radius: 16px; list-style: none; padding: 14px 16px; }
     img { aspect-ratio: 16 / 9; display: block; object-fit: cover; width: 100%; }
     .empty { margin: 0; }
   </style>"""
+
+
+def parse_gallery_submission(form_data: Any) -> list[SteamGalleryGame]:
+    raw_games: dict[int, dict[str, Any]] = {}
+    field_pattern = re.compile(r"^games\[(\d+)]\[(steam_url|name|custom_text|photos)]$")
+    for key, value in form_data.multi_items():
+        match = field_pattern.match(key)
+        if not match:
+            continue
+        game_index = int(match.group(1))
+        field_name = match.group(2)
+        game = raw_games.setdefault(game_index, {"photos": []})
+        if field_name == "photos":
+            game["photos"].append(str(value).strip())
+        else:
+            game[field_name] = str(value).strip()
+
+    if not raw_games:
+        raise HTTPException(status_code=400, detail="Submit at least one game.")
+
+    games: list[SteamGalleryGame] = []
+    errors: list[str] = []
+    for display_index, game_index in enumerate(sorted(raw_games), start=1):
+        game = raw_games[game_index]
+        steam_url = game.get("steam_url", "")
+        name = game.get("name", "")
+        custom_text = game.get("custom_text", "")
+        photos = game.get("photos", [])
+        if not name:
+            errors.append(f"Game {display_index}: name is required.")
+        if not custom_text:
+            errors.append(f"Game {display_index}: custom text is required.")
+        if len(photos) != 4:
+            errors.append(f"Game {display_index}: exactly four photos must be selected.")
+        if steam_url:
+            try:
+                validate_steam_url(steam_url)
+            except HTTPException:
+                errors.append(f"Game {display_index}: Steam URL is invalid.")
+        games.append(SteamGalleryGame(steam_url=steam_url, name=name, custom_text=custom_text, photos=photos))
+
+    if errors:
+        raise HTTPException(status_code=400, detail=" ".join(errors))
+    return games
+
+
+def render_gallery_submission(games: list[SteamGalleryGame]) -> HTMLResponse:
+    items = "\n".join(
+        f"<li><strong>{escape(game.name)}</strong>: {len(game.photos)} photos selected<br><span>{escape(game.custom_text)}</span></li>"
+        for game in games
+    )
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steamboy Gallery Saved</title>
+  {render_gallery_styles()}
+</head>
+<body>
+  <main>
+    <nav><a href="/gallery">← Build another gallery</a> <a href="/">Dashboard</a></nav>
+    <header>
+      <p class="eyebrow">Gallery ready</p>
+      <h1>Selections validated</h1>
+      <p>Every game has a name, custom text, and exactly four selected photos.</p>
+    </header>
+    <ul class="success-list">{items}</ul>
+  </main>
+</body>
+</html>"""
+    )
 
 
 def parse_gallery_steam_urls(raw_urls: str) -> list[str]:
