@@ -1721,6 +1721,8 @@ class SteamGalleryPhotoParser(HTMLParser):
         self.photos: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        print("handle_starttag")
+        print(attrs)
         attributes = dict(attrs)
         if tag == "div" and self._is_highlight_overflow(attributes):
             self._highlight_depth += 1
@@ -1752,10 +1754,14 @@ class SteamGalleryPhotoParser(HTMLParser):
 
     @staticmethod
     def _get_image_url(attributes: dict[str, str | None]) -> str | None:
+        print("_get_image_url")
+        print(attributes)
+        print(attributes.get("src"))
         return attributes.get("src") or attributes.get("data-src") or attributes.get("data-original")
 
     @staticmethod
     def _is_smaller_than_gallery_minimum(attributes: dict[str, str | None]) -> bool:
+        print("_is_smaller_than_gallery_minimum")
         width = parse_image_dimension(attributes.get("width"))
         height = parse_image_dimension(attributes.get("height"))
         photo = SteamGalleryPhotoParser._get_image_url(attributes)
