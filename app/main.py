@@ -1811,8 +1811,8 @@ def draw_gallery_text_overlay(canvas: Image.Image, game_name: str, custom_text: 
 
     text_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(text_layer)
-    title_font = load_gallery_font(92)
-    body_font = load_gallery_font(46)
+    title_font = load_gallery_font(720)
+    body_font = load_gallery_font(400)
     title_max_width = int(canvas.width * 0.86)
     body_max_width = int(canvas.width * 0.82)
     title_line_spacing = 8
