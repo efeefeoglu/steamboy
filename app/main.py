@@ -1565,7 +1565,7 @@ def render_gallery_styles() -> str:
     .merged-gallery-list { display: grid; gap: 28px; margin-top: 28px; }
     .merged-gallery-card { background: rgba(15, 23, 42, 0.78); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35); margin: 0; overflow: hidden; padding: 14px; }
     .merged-image { aspect-ratio: 1 / 1; background: #020617; border-radius: 18px; overflow: hidden; position: relative; width: 100%; }
-    .generated-gallery-image { aspect-ratio: 9 / 16; border-radius: 18px; display: block; margin: 0 auto; max-height: 78vh; max-width: 100%; object-fit: contain; width: auto; }
+    .generated-gallery-image { aspect-ratio: 1 / 1; border-radius: 18px; display: block; margin: 0 auto; max-height: 78vh; max-width: 100%; object-fit: contain; width: auto; }
     .merged-grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); height: 100%; position: relative; width: 100%; z-index: 0; }
     .merged-grid img { aspect-ratio: 1 / 1; height: 100%; object-fit: cover; width: 100%; }
     .merged-image::after { background: linear-gradient(180deg, transparent 20%, rgba(2, 6, 23, 0.1) 46%, rgba(2, 6, 23, 0.54) 100%); content: ""; inset: 0; pointer-events: none; position: absolute; z-index: 1; }
@@ -1814,8 +1814,8 @@ def draw_gallery_text_overlay(canvas: Image.Image, game_name: str, custom_text: 
     title_font = load_gallery_font(460)
     body_font = load_gallery_font(230)
     y = int(canvas.height * 0.61)
-    y = draw_gallery_centered_wrapped_text(draw, game_name, title_font, y, fill="white", max_width=int(canvas.width * 0.86), line_spacing=8)
-    draw_gallery_centered_wrapped_text(draw, custom_text, body_font, y + 28, fill="#f8fafc", max_width=int(canvas.width * 0.82), line_spacing=10)
+    y = draw_gallery_centered_wrapped_text(draw, game_name, title_font, y, fill="white", line_spacing=8)
+    draw_gallery_centered_wrapped_text(draw, custom_text, body_font, y + 28, fill="#f8fafc", line_spacing=10)
 
     canvas.paste(Image.alpha_composite(background, text_layer).convert("RGB"))
 
