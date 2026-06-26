@@ -24,7 +24,7 @@ import paramiko
 import psycopg
 import requests
 import yt_dlp
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -1566,10 +1566,10 @@ def render_gallery_styles() -> str:
     .merged-gallery-card { background: rgba(15, 23, 42, 0.78); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35); margin: 0; overflow: hidden; padding: 14px; }
     .merged-image { aspect-ratio: 1 / 1; background: #020617; border-radius: 18px; overflow: hidden; position: relative; width: 100%; }
     .generated-gallery-image { aspect-ratio: 9 / 16; border-radius: 18px; display: block; margin: 0 auto; max-height: 78vh; max-width: 100%; object-fit: contain; width: auto; }
-    .merged-grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); height: 100%; width: 100%; }
+    .merged-grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); height: 100%; position: relative; width: 100%; z-index: 0; }
     .merged-grid img { aspect-ratio: 1 / 1; height: 100%; object-fit: cover; width: 100%; }
-    .merged-image::after { background: linear-gradient(180deg, transparent 20%, rgba(2, 6, 23, 0.1) 46%, rgba(2, 6, 23, 0.54) 100%); content: ""; inset: 0; position: absolute; }
-    .merged-text { left: 50%; padding: 0 7%; position: absolute; text-align: center; text-shadow: 0 4px 16px rgba(0, 0, 0, 0.95), 0 1px 3px rgba(0, 0, 0, 0.9); top: 65%; transform: translate(-50%, -50%); width: 100%; z-index: 1; }
+    .merged-image::after { background: linear-gradient(180deg, transparent 20%, rgba(2, 6, 23, 0.1) 46%, rgba(2, 6, 23, 0.54) 100%); content: ""; inset: 0; pointer-events: none; position: absolute; z-index: 1; }
+    .merged-text { left: 50%; padding: 0 7%; position: absolute; text-align: center; text-shadow: 0 4px 16px rgba(0, 0, 0, 0.95), 0 1px 3px rgba(0, 0, 0, 0.9); top: 65%; transform: translate(-50%, -50%); width: 100%; z-index: 2; }
     .merged-text h2 { color: #fff; font-size: clamp(2rem, 8vw, 5.5rem); letter-spacing: -0.06em; line-height: 0.95; margin: 0; text-wrap: balance; }
     .merged-text p { color: #f8fafc; font-size: clamp(1rem, 3vw, 2rem); font-weight: 900; line-height: 1.18; margin: 0.45em auto 0; max-width: 88%; text-wrap: balance; }
     .success-list { display: grid; gap: 14px; margin: 24px 0; padding: 0; }
@@ -1807,14 +1807,17 @@ def draw_gallery_text_overlay(canvas: Image.Image, game_name: str, custom_text: 
         alpha = int(max(0, min(190, (y - fade_start) / fade_distance * 190)))
         if alpha:
             overlay_draw.line([(0, y), (canvas.width, y)], fill=(2, 6, 23, alpha))
-    canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB"))
+    background = Image.alpha_composite(canvas.convert("RGBA"), overlay)
 
-    draw = ImageDraw.Draw(canvas)
+    text_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(text_layer)
     title_font = load_gallery_font(92)
     body_font = load_gallery_font(46)
     y = int(canvas.height * 0.61)
     y = draw_centered_wrapped_text(draw, game_name, title_font, y, fill="white", max_width=int(canvas.width * 0.86), line_spacing=8)
     draw_centered_wrapped_text(draw, custom_text, body_font, y + 28, fill="#f8fafc", max_width=int(canvas.width * 0.82), line_spacing=10)
+
+    canvas.paste(Image.alpha_composite(background, text_layer).convert("RGB"))
 
 
 def load_gallery_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -1844,9 +1847,11 @@ def draw_centered_wrapped_text(
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
         x = (GALLERY_IMAGE_WIDTH - text_width) // 2
+        shadow_fill = (0, 0, 0, 230)
+        text_fill = ImageColor.getrgb(fill) + (255,)
         for dx, dy in ((-3, -3), (3, -3), (-3, 3), (3, 3), (0, 4)):
-            draw.text((x + dx, y + dy), line, font=font, fill="black")
-        draw.text((x, y), line, font=font, fill=fill)
+            draw.text((x + dx, y + dy), line, font=font, fill=shadow_fill)
+        draw.text((x, y), line, font=font, fill=text_fill)
         y += text_height + line_spacing
     return y
 
