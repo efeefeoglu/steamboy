@@ -1725,6 +1725,8 @@ class SteamGalleryPhotoParser(HTMLParser):
             self._highlight_depth += 1
             self._add_data_props_photos(attributes)
             return
+        if tag == "div" and self._is_desktopcarousel(attributes):
+            self._add_data_props_photos(attributes)
         if self._highlight_depth and tag == "div":
             self._highlight_depth += 1
             return
@@ -1749,6 +1751,11 @@ class SteamGalleryPhotoParser(HTMLParser):
     def _is_highlight_overflow(attributes: dict[str, str | None]) -> bool:
         classes = (attributes.get("class") or "").split()
         return "highlight_overflow" in classes
+
+    @staticmethod
+    def _is_desktopcarousel(attributes: dict[str, str | None]) -> bool:
+        classes = (attributes.get("class") or "").split()
+        return "gamehighlight_desktopcarousel" in classes
 
     def _add_data_props_photos(self, attributes: dict[str, str | None]) -> None:
         props = parse_steam_gallery_data_props(attributes.get("data-props"))
