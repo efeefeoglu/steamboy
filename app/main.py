@@ -1535,12 +1535,14 @@ def fetch_steam_page_html(steamurl: str) -> str:
 def parse_steam_game_title(html: str) -> str:
     parser = SteamTitleParser()
     parser.feed(html)
+    print(parser.title)
     if not parser.title:
         raise HTTPException(status_code=400, detail="Could not find Steam game title on store page")
     return parser.title
 
 
 def parse_steam_gallery_photos(html: str) -> list[str]:
+    print("getting gallery")
     photos: list[str] = []
     for candidate_html in iter_gallery_html_candidates(html):
         parser = SteamGalleryPhotoParser()
