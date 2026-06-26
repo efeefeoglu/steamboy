@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from html import escape
+from html import escape, unescape as html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
@@ -1544,24 +1544,40 @@ def parse_steam_game_title(html: str) -> str:
 def parse_steam_gallery_photos(html: str) -> list[str]:
     print("getting gallery")
     photos: list[str] = []
-    parser = SteamGalleryPhotoParser()
-    parser.feed(html)
-    print(parser.photos)
-    for raw_url in parser.photos:
-        print(raw_url)
-        photo = normalize_steam_gallery_photo_url(raw_url)
-        if photo and photo not in photos:
-            photos.append(photo)
-            print(photo)
-
-    if photos:
-        return photos[:24]
-
-    for raw_url in re.findall(r'https://shared\.akamai\.steamstatic\.com/store_item_assets/[^"\'<>\\s]+', html):
-        photo = normalize_steam_gallery_photo_url(raw_url)
-        if photo and photo not in photos:
-            photos.append(photo)
+    for candidate_html in iter_gallery_html_candidates(html):
+        parser = SteamGalleryPhotoParser()
+        parser.feed(candidate_html)
+        for raw_url in parser.photos:
+            photo = normalize_steam_gallery_photo_url(raw_url)
+            if photo and photo not in photos:
+                photos.append(photo)
     return photos[:24]
+
+
+def iter_gallery_html_candidates(html: str) -> Iterator[str]:
+    seen: set[str] = set()
+    candidates = [
+        html,
+        html_unescape(html),
+        decode_escaped_steam_html(html),
+        html_unescape(decode_escaped_steam_html(html)),
+    ]
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
+
+def decode_escaped_steam_html(html: str) -> str:
+    return (
+        html.replace("\\u003C", "<")
+        .replace("\\u003c", "<")
+        .replace("\\u003E", ">")
+        .replace("\\u003e", ">")
+        .replace('\\"', '"')
+        .replace("\\'", "'")
+        .replace("\\/", "/")
+    )
 
 
 def normalize_steam_gallery_photo_url(raw_url: str) -> str | None:
@@ -1722,7 +1738,6 @@ class SteamGalleryPhotoParser(HTMLParser):
             attributes = dict(attrs)
             if not self._is_smaller_than_gallery_minimum(attributes):
                 photo = self._get_image_url(attributes)
-                print(photo)
                 if photo and photo not in self.photos:
                     self.photos.append(photo)
 
@@ -1743,6 +1758,11 @@ class SteamGalleryPhotoParser(HTMLParser):
     def _is_smaller_than_gallery_minimum(attributes: dict[str, str | None]) -> bool:
         width = parse_image_dimension(attributes.get("width"))
         height = parse_image_dimension(attributes.get("height"))
+        photo = SteamGalleryPhotoParser._get_image_url(attributes)
+        if photo:
+            url_width, url_height = parse_image_dimensions_from_url(photo)
+            width = width or url_width
+            height = height or url_height
         return any(dimension is not None and dimension < 200 for dimension in (width, height))
 
 
@@ -1753,6 +1773,20 @@ def parse_image_dimension(value: str | None) -> int | None:
     if not match:
         return None
     return int(match.group(1))
+
+
+def parse_image_dimensions_from_url(photo: str) -> tuple[int | None, int | None]:
+    parsed = urlparse(photo.replace("\\/", "/"))
+    query = parse_qs(parsed.query)
+    query_width = parse_image_dimension(query.get("imw", [None])[0])
+    query_height = parse_image_dimension(query.get("imh", [None])[0])
+    if query_width is not None or query_height is not None:
+        return query_width, query_height
+
+    match = re.search(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)", parsed.path)
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
 
 
 def fetch_steam_game_title(steamurl: str) -> str:
