@@ -1543,7 +1543,6 @@ def parse_steam_game_title(html: str) -> str:
 
 def parse_steam_gallery_photos(html: str) -> list[str]:
     print("getting gallery")
-    print(html)
     photos: list[str] = []
     parser = SteamGalleryPhotoParser()
     parser.feed(html)
