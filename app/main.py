@@ -1423,7 +1423,6 @@ def render_gallery_step_one() -> HTMLResponse:
 
 def render_gallery_step_two(games: list[SteamGalleryGame]) -> HTMLResponse:
     cards = "\n".join(render_gallery_game_card(index, game) for index, game in enumerate(games))
-    default_game_name = games[0].name if games else ""
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
@@ -1439,13 +1438,9 @@ def render_gallery_step_two(games: list[SteamGalleryGame]) -> HTMLResponse:
     <header>
       <p class="eyebrow">Step 2 of 2</p>
       <h1>Choose your gallery shots</h1>
-      <p>Review the grabbed gallery details, set the one game name for this form, tweak generated custom text, and select exactly four photos per game.</p>
+      <p>Review the grabbed game names, tweak the generated custom text, and select exactly four photos per game.</p>
     </header>
     <form method="post" action="/gallery/submit" id="gallery-review-form">
-      <section class="form-game-field">
-        <label for="form-game-name">Name of the game</label>
-        <input id="form-game-name" data-form-game-name name="game_name" type="text" value="{escape(default_game_name, quote=True)}" required>
-      </section>
       <div class="game-list">{cards}</div>
       <button type="submit">Create merged images</button>
     </form>
@@ -1454,10 +1449,10 @@ def render_gallery_step_two(games: list[SteamGalleryGame]) -> HTMLResponse:
     const form = document.querySelector('#gallery-review-form');
 
     function validateGameCard(card) {{
-      const formGameName = document.querySelector('[data-form-game-name]');
+      const name = card.querySelector('[data-game-name]');
       const customText = card.querySelector('[data-custom-text]');
       const checked = card.querySelectorAll('[data-photo-checkbox]:checked');
-      const isValid = formGameName.value.trim() && customText.value.trim() && checked.length === 4;
+      const isValid = name.value.trim() && customText.value.trim() && checked.length === 4;
       card.querySelector('[data-selected-count]').textContent = checked.length;
       card.querySelector('[data-game-error]').hidden = Boolean(isValid);
       return Boolean(isValid);
@@ -1478,9 +1473,6 @@ def render_gallery_step_two(games: list[SteamGalleryGame]) -> HTMLResponse:
 
     form.addEventListener('submit', (event) => {{
       const cards = Array.from(document.querySelectorAll('[data-game-card]'));
-      document.querySelectorAll('[data-hidden-game-name]').forEach((input) => {{
-        input.value = document.querySelector('[data-form-game-name]').value.trim();
-      }});
       if (!cards.every(validateGameCard)) {{
         event.preventDefault();
         const firstInvalid = cards.find((card) => !validateGameCard(card));
@@ -1499,14 +1491,15 @@ def render_gallery_game_card(index: int, game: SteamGalleryGame) -> str:
         photos = '<p class="empty">No gallery photos were found for this Steam page.</p>'
     return f"""<section class="game-card" data-game-card>
   <input type="hidden" name="games[{index}][steam_url]" value="{escape(game.steam_url, quote=True)}">
-  <input data-hidden-game-name type="hidden" name="games[{index}][name]" value="{escape(game.name, quote=True)}">
+  <label for="game-name-{index}">Name of the game</label>
+  <input id="game-name-{index}" data-game-name name="games[{index}][name]" type="text" value="{escape(game.name, quote=True)}" required>
   <label for="custom-text-{index}">Custom text</label>
   <input id="custom-text-{index}" data-custom-text name="games[{index}][custom_text]" type="text" value="{escape(game.custom_text, quote=True)}" required>
   <div class="gallery-heading">
     <label>Photo gallery</label>
     <span><strong data-selected-count>0</strong>/4 selected</span>
   </div>
-  <p class="form-error" data-game-error hidden>Game name, custom text, and exactly four photos are required for this game.</p>
+  <p class="form-error" data-game-error hidden>Name, custom text, and exactly four photos are required for this game.</p>
   <div class="photo-grid">{photos}</div>
 </section>"""
 
@@ -1566,7 +1559,6 @@ def render_gallery_styles() -> str:
 
 def parse_gallery_submission(form_data: Any) -> list[SteamGalleryGame]:
     raw_games: dict[int, dict[str, Any]] = {}
-    form_game_name = str(form_data.get("game_name", "")).strip()
     field_pattern = re.compile(r"^games\[(\d+)]\[(steam_url|name|custom_text|photos)]$")
     for key, value in form_data.multi_items():
         match = field_pattern.match(key)
@@ -1588,7 +1580,7 @@ def parse_gallery_submission(form_data: Any) -> list[SteamGalleryGame]:
     for display_index, game_index in enumerate(sorted(raw_games), start=1):
         game = raw_games[game_index]
         steam_url = game.get("steam_url", "")
-        name = form_game_name or game.get("name", "")
+        name = game.get("name", "")
         custom_text = game.get("custom_text", "")
         photos = game.get("photos", [])
         if not name:
