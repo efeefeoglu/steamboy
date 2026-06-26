@@ -16,7 +16,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import uuid4
 
 import imageio_ffmpeg
@@ -76,6 +76,13 @@ class SftpUploadResponse(BaseModel):
 class SteamVideoResponse(BaseModel):
     source_video_url: str
     sftp_file: SftpUploadResponse
+
+
+class SteamGalleryGame(BaseModel):
+    steam_url: str
+    name: str
+    custom_text: str
+    photos: list[str]
 
 
 class BufferChannel(BaseModel):
@@ -407,7 +414,7 @@ def dashboard(request: Request) -> HTMLResponse:
     <header>
       <h1>Steamboy Dashboard</h1>
       <p>Add, run, and delete Steam store URLs saved in your Neon Postgres <code>steam</code> table.</p>
-      <div class="header-actions"><a class="button-link" href="/youtube/login">Connect YouTube</a></div>
+      <div class="header-actions"><a class="button-link" href="/gallery">Gallery</a> <a class="button-link" href="/youtube/login">Connect YouTube</a></div>
     </header>
     {dashboard_message}
 
@@ -570,6 +577,18 @@ def dashboard(request: Request) -> HTMLResponse:
 </body>
 </html>"""
     )
+
+
+@app.get("/gallery", response_class=HTMLResponse)
+def gallery() -> HTMLResponse:
+    return render_gallery_step_one()
+
+
+@app.post("/gallery", response_class=HTMLResponse)
+def build_gallery(steamurls: Annotated[str, Form()]) -> HTMLResponse:
+    urls = parse_gallery_steam_urls(steamurls)
+    games = [fetch_steam_gallery_game(url) for url in urls]
+    return render_gallery_step_two(games)
 
 
 @app.get("/youtube/login", response_class=HTMLResponse)
@@ -1357,6 +1376,206 @@ def buffer_graphql_request(query: str, variables: dict | None = None) -> dict:
     if not isinstance(data, dict):
         raise HTTPException(status_code=502, detail="Buffer returned an invalid GraphQL payload")
     return data
+
+
+def render_gallery_step_one() -> HTMLResponse:
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steamboy Gallery</title>
+  {render_gallery_styles()}
+</head>
+<body>
+  <main>
+    <nav><a href="/">← Dashboard</a></nav>
+    <header>
+      <p class="eyebrow">Step 1 of 2</p>
+      <h1>Build a Steam gallery</h1>
+      <p>Add one Steam store URL per line. Steamboy will fetch each game name, generate a tiny spicy blurb, and collect gallery photos for the next step.</p>
+    </header>
+    <section>
+      <form method="post" action="/gallery">
+        <label for="steamurls">Steam URLs</label>
+        <textarea id="steamurls" name="steamurls" rows="10" placeholder="https://store.steampowered.com/app/730/CounterStrike_2/&#10;https://store.steampowered.com/app/570/Dota_2/" required></textarea>
+        <button type="submit">Continue to gallery</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>"""
+    )
+
+
+def render_gallery_step_two(games: list[SteamGalleryGame]) -> HTMLResponse:
+    cards = "\n".join(render_gallery_game_card(index, game) for index, game in enumerate(games))
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steamboy Gallery Review</title>
+  {render_gallery_styles()}
+</head>
+<body>
+  <main>
+    <nav><a href="/gallery">← Start over</a> <a href="/">Dashboard</a></nav>
+    <header>
+      <p class="eyebrow">Step 2 of 2</p>
+      <h1>Choose your gallery shots</h1>
+      <p>Review the grabbed game names, tweak the generated custom text, and select exactly four photos per game.</p>
+    </header>
+    <form method="post" action="#">
+      <div class="game-list">{cards}</div>
+      <button type="submit" disabled>Output continues in the next phase</button>
+    </form>
+  </main>
+  <script>
+    document.querySelectorAll('[data-photo-checkbox]').forEach((checkbox) => {{
+      checkbox.addEventListener('change', () => {{
+        const card = checkbox.closest('[data-game-card]');
+        const checked = card.querySelectorAll('[data-photo-checkbox]:checked');
+        if (checked.length > 4) checkbox.checked = false;
+        card.querySelector('[data-selected-count]').textContent = card.querySelectorAll('[data-photo-checkbox]:checked').length;
+      }});
+    }});
+  </script>
+</body>
+</html>"""
+    )
+
+
+def render_gallery_game_card(index: int, game: SteamGalleryGame) -> str:
+    photos = "\n".join(render_gallery_photo_option(index, photo_index, photo) for photo_index, photo in enumerate(game.photos))
+    if not photos:
+        photos = '<p class="empty">No gallery photos were found for this Steam page.</p>'
+    return f"""<section class="game-card" data-game-card>
+  <input type="hidden" name="games[{index}][steam_url]" value="{escape(game.steam_url, quote=True)}">
+  <label for="game-name-{index}">Name of the game</label>
+  <input id="game-name-{index}" name="games[{index}][name]" type="text" value="{escape(game.name, quote=True)}">
+  <label for="custom-text-{index}">Custom text</label>
+  <input id="custom-text-{index}" name="games[{index}][custom_text]" type="text" value="{escape(game.custom_text, quote=True)}">
+  <div class="gallery-heading">
+    <label>Photo gallery</label>
+    <span><strong data-selected-count>0</strong>/4 selected</span>
+  </div>
+  <div class="photo-grid">{photos}</div>
+</section>"""
+
+
+def render_gallery_photo_option(game_index: int, photo_index: int, photo: str) -> str:
+    escaped_photo = escape(photo, quote=True)
+    return f"""<label class="photo-option">
+  <input data-photo-checkbox type="checkbox" name="games[{game_index}][photos]" value="{escaped_photo}">
+  <img src="{escaped_photo}" alt="Steam gallery image {photo_index + 1}" loading="lazy">
+</label>"""
+
+
+def render_gallery_styles() -> str:
+    return """<style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #101827; color: #f8fafc; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(20, 184, 166, 0.22), transparent 34rem), linear-gradient(135deg, #0f172a 0%, #111827 100%); }
+    main { width: min(1100px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0; }
+    nav { display: flex; gap: 14px; margin-bottom: 24px; }
+    a { color: #93c5fd; font-weight: 800; text-decoration: none; }
+    h1 { margin: 0 0 8px; font-size: clamp(2rem, 5vw, 3.8rem); letter-spacing: -0.06em; }
+    p { color: #cbd5e1; line-height: 1.6; }
+    .eyebrow { color: #5eead4; font-weight: 900; letter-spacing: 0.12em; margin: 0 0 8px; text-transform: uppercase; }
+    section { background: rgba(15, 23, 42, 0.78); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35); padding: 24px; margin-top: 20px; backdrop-filter: blur(16px); }
+    label { color: #e2e8f0; display: block; font-weight: 800; margin: 0 0 10px; }
+    input[type="text"], textarea { width: 100%; box-sizing: border-box; border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 14px; color: #f8fafc; background: rgba(15, 23, 42, 0.95); padding: 13px 14px; font: inherit; outline: none; margin-bottom: 18px; }
+    textarea { resize: vertical; }
+    input:focus, textarea:focus { border-color: #5eead4; box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.14); }
+    button { border: 0; border-radius: 14px; background: linear-gradient(135deg, #0d9488, #2563eb); color: white; cursor: pointer; font: inherit; font-weight: 900; padding: 13px 18px; }
+    button:disabled { cursor: not-allowed; opacity: 0.58; }
+    .game-list { display: grid; gap: 20px; }
+    .gallery-heading { align-items: center; display: flex; justify-content: space-between; gap: 12px; }
+    .gallery-heading span { color: #cbd5e1; font-weight: 800; }
+    .photo-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+    .photo-option { border: 2px solid rgba(148, 163, 184, 0.25); border-radius: 18px; cursor: pointer; margin: 0; overflow: hidden; position: relative; }
+    .photo-option input { left: 12px; position: absolute; top: 12px; transform: scale(1.3); z-index: 1; }
+    .photo-option:has(input:checked) { border-color: #5eead4; box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.14); }
+    img { aspect-ratio: 16 / 9; display: block; object-fit: cover; width: 100%; }
+    .empty { margin: 0; }
+  </style>"""
+
+
+def parse_gallery_steam_urls(raw_urls: str) -> list[str]:
+    urls = [line.strip() for line in raw_urls.splitlines() if line.strip()]
+    if not urls:
+        raise HTTPException(status_code=400, detail="Add at least one Steam URL.")
+    for url in urls:
+        validate_steam_url(url)
+    return urls
+
+
+def fetch_steam_gallery_game(steamurl: str) -> SteamGalleryGame:
+    html = fetch_steam_page_html(steamurl)
+    title = parse_steam_game_title(html)
+    return SteamGalleryGame(
+        steam_url=steamurl,
+        name=title,
+        custom_text=generate_gallery_custom_text(title, steamurl),
+        photos=parse_steam_gallery_photos(html),
+    )
+
+
+def fetch_steam_page_html(steamurl: str) -> str:
+    try:
+        response = requests.get(steamurl, headers={"User-Agent": "Steamboy/0.1 (+https://store.steampowered.com/)"}, timeout=15)
+        response.raise_for_status()
+        return response.text
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=400, detail=f"Could not load Steam store page: {exc}") from exc
+
+
+def parse_steam_game_title(html: str) -> str:
+    parser = SteamTitleParser()
+    parser.feed(html)
+    if not parser.title:
+        raise HTTPException(status_code=400, detail="Could not find Steam game title on store page")
+    return parser.title
+
+
+def parse_steam_gallery_photos(html: str) -> list[str]:
+    photos: list[str] = []
+    for raw_url in re.findall(r'https://shared\\.akamai\\.steamstatic\\.com/store_item_assets/[^"\'<>\\s]+', html):
+        photo = raw_url.replace("\\/", "/")
+        if not re.search(r'\\.(?:jpg|jpeg|png)(?:\\?|$)', photo, flags=re.IGNORECASE):
+            continue
+        photo = strip_steam_image_size_query(photo)
+        if photo not in photos:
+            photos.append(photo)
+    return photos[:24]
+
+
+def strip_steam_image_size_query(photo: str) -> str:
+    parsed = urlparse(photo)
+    query = parse_qs(parsed.query)
+    if "imw" in query or "imh" in query:
+        return parsed._replace(query="").geturl()
+    return photo
+
+
+def generate_gallery_custom_text(game_name: str, steamurl: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return f"{game_name} looks ready to eat your weekend and leave zero crumbs."
+    model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    payload = {
+        "model": model,
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": f"Write one very short fun explanation of this game in 18 words or fewer. Game: {game_name}. Steam URL: {steamurl}"}]}],
+    }
+    try:
+        response = requests.post("https://api.openai.com/v1/responses", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, timeout=30)
+        response.raise_for_status()
+        text = extract_response_output_text(response.json()).strip().strip('"')
+        return text[:180] or f"{game_name} looks ready to eat your weekend and leave zero crumbs."
+    except (requests.RequestException, ValueError):
+        return f"{game_name} looks ready to eat your weekend and leave zero crumbs."
 
 
 def render_dashboard_alert(message: str, kind: str = "warning") -> str:
