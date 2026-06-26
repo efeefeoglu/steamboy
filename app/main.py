@@ -11,12 +11,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from html import escape
+from html import escape, unescape as html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from uuid import uuid4
 
 import imageio_ffmpeg
@@ -1542,14 +1542,50 @@ def parse_steam_game_title(html: str) -> str:
 
 def parse_steam_gallery_photos(html: str) -> list[str]:
     photos: list[str] = []
-    for raw_url in re.findall(r'https://shared\\.akamai\\.steamstatic\\.com/store_item_assets/[^"\'<>\\s]+', html):
-        photo = raw_url.replace("\\/", "/")
-        if not re.search(r'\\.(?:jpg|jpeg|png)(?:\\?|$)', photo, flags=re.IGNORECASE):
-            continue
-        photo = strip_steam_image_size_query(photo)
-        if photo not in photos:
-            photos.append(photo)
+    for candidate_html in iter_gallery_html_candidates(html):
+        parser = SteamGalleryPhotoParser()
+        parser.feed(candidate_html)
+        for raw_url in parser.photos:
+            photo = normalize_steam_gallery_photo_url(raw_url)
+            if photo and photo not in photos:
+                photos.append(photo)
     return photos[:24]
+
+
+def iter_gallery_html_candidates(html: str) -> Iterator[str]:
+    seen: set[str] = set()
+    candidates = [
+        html,
+        html_unescape(html),
+        decode_escaped_steam_html(html),
+        html_unescape(decode_escaped_steam_html(html)),
+    ]
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
+
+def decode_escaped_steam_html(html: str) -> str:
+    return (
+        html.replace("\\u003C", "<")
+        .replace("\\u003c", "<")
+        .replace("\\u003E", ">")
+        .replace("\\u003e", ">")
+        .replace('\\"', '"')
+        .replace("\\'", "'")
+        .replace("\\/", "/")
+    )
+
+
+def normalize_steam_gallery_photo_url(raw_url: str) -> str | None:
+    photo = raw_url.replace("\\/", "/").strip()
+    if photo.startswith("//"):
+        photo = f"https:{photo}"
+    photo = unquote(photo)
+    if not re.search(r'\.(?:jpg|jpeg|png)(?:\?|$)', photo, flags=re.IGNORECASE):
+        return None
+    return strip_steam_image_size_query(photo)
 
 
 def strip_steam_image_size_query(photo: str) -> str:
@@ -1674,6 +1710,81 @@ class SteamTitleParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if self._in_app_name and tag == "div":
             self._in_app_name = False
+
+
+class SteamGalleryPhotoParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._highlight_depth = 0
+        self.photos: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "div" and self._is_highlight_overflow(attributes):
+            self._highlight_depth += 1
+            return
+        if self._highlight_depth and tag == "div":
+            self._highlight_depth += 1
+            return
+        if self._highlight_depth and tag == "img" and not self._is_smaller_than_gallery_minimum(attributes):
+            photo = self._get_image_url(attributes)
+            if photo and photo not in self.photos:
+                self.photos.append(photo)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "img" and self._highlight_depth:
+            attributes = dict(attrs)
+            if not self._is_smaller_than_gallery_minimum(attributes):
+                photo = self._get_image_url(attributes)
+                if photo and photo not in self.photos:
+                    self.photos.append(photo)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._highlight_depth and tag == "div":
+            self._highlight_depth -= 1
+
+    @staticmethod
+    def _is_highlight_overflow(attributes: dict[str, str | None]) -> bool:
+        classes = (attributes.get("class") or "").split()
+        return "highlight_overflow" in classes
+
+    @staticmethod
+    def _get_image_url(attributes: dict[str, str | None]) -> str | None:
+        return attributes.get("src") or attributes.get("data-src") or attributes.get("data-original")
+
+    @staticmethod
+    def _is_smaller_than_gallery_minimum(attributes: dict[str, str | None]) -> bool:
+        width = parse_image_dimension(attributes.get("width"))
+        height = parse_image_dimension(attributes.get("height"))
+        photo = SteamGalleryPhotoParser._get_image_url(attributes)
+        if photo:
+            url_width, url_height = parse_image_dimensions_from_url(photo)
+            width = width or url_width
+            height = height or url_height
+        return any(dimension is not None and dimension < 200 for dimension in (width, height))
+
+
+def parse_image_dimension(value: str | None) -> int | None:
+    if value is None:
+        return None
+    match = re.match(r"\s*(\d+)", value)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def parse_image_dimensions_from_url(photo: str) -> tuple[int | None, int | None]:
+    parsed = urlparse(photo.replace("\\/", "/"))
+    query = parse_qs(parsed.query)
+    query_width = parse_image_dimension(query.get("imw", [None])[0])
+    query_height = parse_image_dimension(query.get("imh", [None])[0])
+    if query_width is not None or query_height is not None:
+        return query_width, query_height
+
+    match = re.search(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)", parsed.path)
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
 
 
 def fetch_steam_game_title(steamurl: str) -> str:
