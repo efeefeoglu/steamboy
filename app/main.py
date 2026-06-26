@@ -1814,8 +1814,10 @@ def draw_gallery_text_overlay(canvas: Image.Image, game_name: str, custom_text: 
     title_font = load_gallery_font(460)
     body_font = load_gallery_font(230)
     y = int(canvas.height * 0.61)
-    y = draw_centered_wrapped_text(draw, game_name, title_font, y, fill="white", max_width=int(canvas.width * 0.86), line_spacing=8)
-    draw_centered_wrapped_text(draw, custom_text, body_font, y + 28, fill="#f8fafc", max_width=int(canvas.width * 0.82), line_spacing=10)
+    y = draw_gallery_centered_wrapped_text(draw, game_name, title_font, y, fill="white", max_width=int(canvas.width * 0.86), line_spacing=8)
+    draw_gallery_centered_wrapped_text(draw, custom_text, body_font, y + 28, fill="#f8fafc", max_width=int(canvas.width * 0.82), line_spacing=10)
+
+    canvas.paste(Image.alpha_composite(background, text_layer).convert("RGB"))
 
     canvas.paste(Image.alpha_composite(background, text_layer).convert("RGB"))
 
@@ -1832,22 +1834,7 @@ def load_gallery_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont
     return ImageFont.load_default()
 
 
-def measure_wrapped_text_height(
-    draw: ImageDraw.ImageDraw,
-    lines: list[str],
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-    line_spacing: int,
-) -> int:
-    height = 0
-    for index, line in enumerate(lines):
-        bbox = draw.textbbox((0, 0), line, font=font)
-        height += bbox[3] - bbox[1]
-        if index < len(lines) - 1:
-            height += line_spacing
-    return height
-
-
-def draw_centered_text_lines(
+def draw_gallery_centered_wrapped_text(
     draw: ImageDraw.ImageDraw,
     lines: list[str],
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
