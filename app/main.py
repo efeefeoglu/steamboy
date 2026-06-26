@@ -1565,11 +1565,11 @@ def render_gallery_styles() -> str:
     .merged-gallery-list { display: grid; gap: 28px; margin-top: 28px; }
     .merged-gallery-card { background: rgba(15, 23, 42, 0.78); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35); margin: 0; overflow: hidden; padding: 14px; }
     .merged-image { aspect-ratio: 1 / 1; background: #020617; border-radius: 18px; overflow: hidden; position: relative; width: 100%; }
-    .generated-gallery-image { aspect-ratio: 9 / 16; border-radius: 18px; display: block; margin: 0 auto; max-height: 78vh; max-width: 100%; object-fit: contain; width: auto; }
+    .generated-gallery-image { aspect-ratio: 1 / 1; border-radius: 18px; display: block; margin: 0 auto; max-height: 78vh; max-width: 100%; object-fit: contain; width: auto; }
     .merged-grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); height: 100%; position: relative; width: 100%; z-index: 0; }
     .merged-grid img { aspect-ratio: 1 / 1; height: 100%; object-fit: cover; width: 100%; }
     .merged-image::after { background: linear-gradient(180deg, transparent 20%, rgba(2, 6, 23, 0.1) 46%, rgba(2, 6, 23, 0.54) 100%); content: ""; inset: 0; pointer-events: none; position: absolute; z-index: 1; }
-    .merged-text { left: 50%; padding: 0 7%; position: absolute; text-align: center; text-shadow: 0 4px 16px rgba(0, 0, 0, 0.95), 0 1px 3px rgba(0, 0, 0, 0.9); top: 65%; transform: translate(-50%, -50%); width: 100%; z-index: 2; }
+    .merged-text { left: 50%; padding: 0 7%; position: absolute; text-align: center; text-shadow: 0 4px 16px rgba(0, 0, 0, 0.95), 0 1px 3px rgba(0, 0, 0, 0.9); top: 75%; transform: translate(-50%, -50%); width: 100%; z-index: 2; }
     .merged-text h2 { color: #fff; font-size: clamp(2rem, 8vw, 5.5rem); letter-spacing: -0.06em; line-height: 0.95; margin: 0; text-wrap: balance; }
     .merged-text p { color: #f8fafc; font-size: clamp(1rem, 3vw, 2rem); font-weight: 900; line-height: 1.18; margin: 0.45em auto 0; max-width: 88%; text-wrap: balance; }
     .success-list { display: grid; gap: 14px; margin: 24px 0; padding: 0; }
@@ -1813,9 +1813,21 @@ def draw_gallery_text_overlay(canvas: Image.Image, game_name: str, custom_text: 
     draw = ImageDraw.Draw(text_layer)
     title_font = load_gallery_font(92)
     body_font = load_gallery_font(46)
-    y = int(canvas.height * 0.61)
-    y = draw_centered_wrapped_text(draw, game_name, title_font, y, fill="white", max_width=int(canvas.width * 0.86), line_spacing=8)
-    draw_centered_wrapped_text(draw, custom_text, body_font, y + 28, fill="#f8fafc", max_width=int(canvas.width * 0.82), line_spacing=10)
+    title_max_width = int(canvas.width * 0.86)
+    body_max_width = int(canvas.width * 0.82)
+    title_line_spacing = 8
+    body_line_spacing = 10
+    paragraph_spacing = 28
+
+    title_lines = wrap_gallery_text(draw, game_name, title_font, title_max_width)
+    body_lines = wrap_gallery_text(draw, custom_text, body_font, body_max_width)
+    text_height = measure_wrapped_text_height(draw, title_lines, title_font, title_line_spacing)
+    text_height += paragraph_spacing + measure_wrapped_text_height(draw, body_lines, body_font, body_line_spacing)
+    bottom_half_top = canvas.height // 2
+    y = bottom_half_top + max(0, (canvas.height - bottom_half_top - text_height) // 2)
+
+    y = draw_centered_text_lines(draw, title_lines, title_font, y, fill="white", line_spacing=title_line_spacing)
+    draw_centered_text_lines(draw, body_lines, body_font, y + paragraph_spacing, fill="#f8fafc", line_spacing=body_line_spacing)
 
     canvas.paste(Image.alpha_composite(background, text_layer).convert("RGB"))
 
@@ -1832,17 +1844,31 @@ def load_gallery_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont
     return ImageFont.load_default()
 
 
-def draw_centered_wrapped_text(
+def measure_wrapped_text_height(
     draw: ImageDraw.ImageDraw,
-    text: str,
+    lines: list[str],
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    line_spacing: int,
+) -> int:
+    height = 0
+    for index, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        height += bbox[3] - bbox[1]
+        if index < len(lines) - 1:
+            height += line_spacing
+    return height
+
+
+def draw_centered_text_lines(
+    draw: ImageDraw.ImageDraw,
+    lines: list[str],
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
     y: int,
     *,
     fill: str,
-    max_width: int,
     line_spacing: int,
 ) -> int:
-    for line in wrap_gallery_text(draw, text, font, max_width):
+    for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
