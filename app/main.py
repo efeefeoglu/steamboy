@@ -1829,7 +1829,10 @@ def load_gallery_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont
     ):
         if Path(font_path).exists():
             return ImageFont.truetype(font_path, size=size)
-    return ImageFont.load_default()
+    try:
+        return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
+    except OSError:
+        return ImageFont.load_default(size=size)
 
 
 def draw_gallery_centered_wrapped_text(
