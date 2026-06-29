@@ -26,7 +26,7 @@ import requests
 import yt_dlp
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, HttpUrl
 from yt_dlp.utils import download_range_func
@@ -163,22 +163,13 @@ youtube_oauth_states_lock = Lock()
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
-    records: list[SteamRecord] = []
     dashboard_message = ""
-    try:
-        records = list_steam_records()
-    except HTTPException as exc:
-        dashboard_message = render_dashboard_alert(str(exc.detail))
-    except psycopg.Error as exc:
-        dashboard_message = render_dashboard_alert(f"Could not load Steam URLs from Neon DB: {exc}")
-
     youtube_message = request.query_params.get("youtube")
+    upload_message = request.query_params.get("upload")
     if youtube_message == "connected":
         dashboard_message += render_dashboard_alert("YouTube connected successfully.", kind="success")
-
-    rows = "\n".join(render_steam_record_row(record) for record in records)
-    if not rows:
-        rows = '<tr><td colspan="4" class="empty">No Steam URLs have been saved yet.</td></tr>'
+    if upload_message == "success":
+        dashboard_message += render_dashboard_alert("Video uploaded to YouTube successfully.", kind="success")
 
     return HTMLResponse(
         f"""<!doctype html>
@@ -186,7 +177,7 @@ def dashboard(request: Request) -> HTMLResponse:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Steamboy Dashboard</title>
+  <title>Steamboy YouTube Upload</title>
   <style>
     :root {{
       color-scheme: dark;
@@ -198,27 +189,21 @@ def dashboard(request: Request) -> HTMLResponse:
       margin: 0;
       min-height: 100vh;
       background:
-        radial-gradient(circle at top left, rgba(59, 130, 246, 0.22), transparent 34rem),
+        radial-gradient(circle at top left, rgba(220, 38, 38, 0.22), transparent 34rem),
         linear-gradient(135deg, #0f172a 0%, #111827 100%);
     }}
     main {{
-      width: min(1100px, calc(100% - 32px));
+      width: min(760px, calc(100% - 32px));
       margin: 0 auto;
       padding: 48px 0;
     }}
-    header {{
-      margin-bottom: 28px;
-    }}
+    header {{ margin-bottom: 28px; }}
     h1 {{
       margin: 0 0 8px;
       font-size: clamp(2rem, 5vw, 3.8rem);
       letter-spacing: -0.06em;
     }}
-    p {{
-      color: #cbd5e1;
-      margin: 0;
-      line-height: 1.6;
-    }}
+    p {{ color: #cbd5e1; margin: 0; line-height: 1.6; }}
     section {{
       background: rgba(15, 23, 42, 0.78);
       border: 1px solid rgba(148, 163, 184, 0.22);
@@ -228,19 +213,8 @@ def dashboard(request: Request) -> HTMLResponse:
       margin-top: 20px;
       backdrop-filter: blur(16px);
     }}
-    label {{
-      display: block;
-      color: #e2e8f0;
-      font-weight: 700;
-      margin-bottom: 10px;
-    }}
-    .add-form {{
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
-      align-items: end;
-    }}
-    input[type="url"], input[type="text"] {{
+    label {{ display: block; color: #e2e8f0; font-weight: 700; margin-bottom: 10px; }}
+    input[type="file"], input[type="text"], textarea {{
       width: 100%;
       box-sizing: border-box;
       border: 1px solid rgba(148, 163, 184, 0.35);
@@ -250,135 +224,26 @@ def dashboard(request: Request) -> HTMLResponse:
       padding: 13px 14px;
       font: inherit;
       outline: none;
+      margin-bottom: 18px;
     }}
-    input:focus {{
-      border-color: #60a5fa;
-      box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.16);
+    textarea {{ min-height: 150px; resize: vertical; }}
+    input:focus, textarea:focus {{
+      border-color: #f87171;
+      box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.16);
     }}
-    button {{
+    button, .button-link {{
       border: 0;
       border-radius: 14px;
-      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      background: linear-gradient(135deg, #dc2626, #9333ea);
       color: white;
       cursor: pointer;
-      font: inherit;
-      font-weight: 800;
-      padding: 13px 18px;
-      white-space: nowrap;
-    }}
-    button.danger {{
-      background: #be123c;
-    }}
-    button:disabled {{
-      cursor: wait;
-      opacity: 0.68;
-    }}
-    .row-status {{
-      color: #cbd5e1;
-      font-size: 0.92rem;
-      min-width: 5rem;
-    }}
-    .review-button {{
-      background: #9333ea;
-    }}
-    .share-button {{
-      background: #0284c7;
-    }}
-    .video-button {{
-      align-items: center;
-      background: #0f766e;
-      border-radius: 14px;
-      color: white;
       display: inline-flex;
+      font: inherit;
       font-weight: 800;
       padding: 13px 18px;
       text-decoration: none;
     }}
-    .name-cell {{
-      align-items: center;
-      display: flex;
-      gap: 10px;
-      position: relative;
-    }}
-    .review-tooltip-trigger {{
-      align-items: center;
-      background: rgba(147, 51, 234, 0.22);
-      border: 1px solid rgba(196, 181, 253, 0.4);
-      border-radius: 999px;
-      color: #ddd6fe;
-      cursor: help;
-      display: inline-flex;
-      font-size: 0.78rem;
-      font-weight: 900;
-      height: 1.45rem;
-      justify-content: center;
-      line-height: 1;
-      width: 1.45rem;
-    }}
-    .review-tooltip {{
-      background: rgba(15, 23, 42, 0.98);
-      border: 1px solid rgba(196, 181, 253, 0.38);
-      border-radius: 18px;
-      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
-      color: #cbd5e1;
-      font-size: 0.92rem;
-      left: calc(100% + 12px);
-      line-height: 1.5;
-      min-width: min(22rem, 70vw);
-      opacity: 0;
-      padding: 14px 16px;
-      pointer-events: none;
-      position: absolute;
-      top: 50%;
-      transform: translateY(-50%) translateX(-6px);
-      transition: opacity 0.16s ease, transform 0.16s ease;
-      visibility: hidden;
-      z-index: 10;
-    }}
-    .review-tooltip strong {{
-      color: #f8fafc;
-      display: block;
-      font-size: 1rem;
-      margin-bottom: 6px;
-    }}
-    .review-tooltip-trigger:hover + .review-tooltip,
-    .review-tooltip-trigger:focus + .review-tooltip {{
-      opacity: 1;
-      transform: translateY(-50%);
-      visibility: visible;
-    }}
-    .error-text {{
-      color: #fca5a5;
-    }}
-    table {{
-      border-collapse: collapse;
-      width: 100%;
-    }}
-    th, td {{
-      border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-      padding: 14px 10px;
-      text-align: left;
-      vertical-align: middle;
-    }}
-    th {{
-      color: #93c5fd;
-      font-size: 0.82rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }}
-    a {{
-      color: #93c5fd;
-      overflow-wrap: anywhere;
-    }}
-    .actions {{
-      display: flex;
-      gap: 8px;
-      justify-content: flex-end;
-    }}
-    .empty {{
-      color: #cbd5e1;
-      text-align: center;
-    }}
+    .button-link.secondary {{ background: #334155; margin-left: 8px; }}
     .alert {{
       background: rgba(202, 138, 4, 0.14);
       border: 1px solid rgba(250, 204, 21, 0.38);
@@ -392,210 +257,34 @@ def dashboard(request: Request) -> HTMLResponse:
       border-color: rgba(74, 222, 128, 0.42);
       color: #dcfce7;
     }}
-    .header-actions {{
-      margin-top: 16px;
-    }}
-    .button-link {{
-      align-items: center;
-      background: linear-gradient(135deg, #dc2626, #9333ea);
-      border-radius: 14px;
-      color: white;
-      display: inline-flex;
-      font-weight: 800;
-      padding: 13px 18px;
-      text-decoration: none;
-    }}
-    @media (max-width: 720px) {{
-      .add-form {{
-        grid-template-columns: 1fr;
-      }}
-      .actions {{
-        justify-content: flex-start;
-      }}
-      .review-tooltip {{
-        left: 0;
-        top: calc(100% + 8px);
-        transform: translateY(-4px);
-      }}
-      .review-tooltip-trigger:hover + .review-tooltip,
-      .review-tooltip-trigger:focus + .review-tooltip {{
-        transform: translateY(0);
-      }}
-      th:nth-child(1), td:nth-child(1) {{
-        display: none;
-      }}
-    }}
+    .header-actions {{ margin-top: 16px; }}
   </style>
 </head>
 <body>
   <main>
     <header>
-      <h1>Steamboy Dashboard</h1>
-      <p>Add, run, and delete Steam store URLs saved in your Neon Postgres <code>steam</code> table.</p>
-      <div class="header-actions"><a class="button-link" href="/gallery">Gallery</a> <a class="button-link" href="/youtube/login">Connect YouTube</a></div>
+      <h1>Upload to YouTube</h1>
+      <p>Upload one finished video file and publish it to YouTube with your title and description. This flow does not fetch or process Steam trailers.</p>
+      <div class="header-actions"><a class="button-link" href="/youtube/login">Connect YouTube</a> <a class="button-link secondary" href="/gallery">Gallery</a></div>
     </header>
     {dashboard_message}
 
-    <section aria-labelledby="add-title">
-      <h2 id="add-title">Add Steam URL</h2>
-      <form class="add-form" method="post" action="/steam-urls">
-        <div>
-          <label for="steamurl">Steam URL</label>
-          <input id="steamurl" name="steamurl" type="url" placeholder="https://store.steampowered.com/app/730/CounterStrike_2/" required>
-        </div>
-        <button type="submit">Save URL</button>
+    <section aria-labelledby="upload-title">
+      <h2 id="upload-title">New YouTube video</h2>
+      <form method="post" action="/youtube/upload" enctype="multipart/form-data">
+        <label for="video">Video file</label>
+        <input id="video" name="video" type="file" accept="video/*" required>
+        <label for="title">Title</label>
+        <input id="title" name="title" type="text" maxlength="100" placeholder="YouTube video title" required>
+        <label for="description">Description</label>
+        <textarea id="description" name="description" placeholder="YouTube video description" required></textarea>
+        <button type="submit">Upload to YouTube</button>
       </form>
     </section>
-
-    <section aria-labelledby="saved-title">
-      <h2 id="saved-title">Saved Steam URLs</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Name</th>
-            <th>Run</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows}
-        </tbody>
-      </table>
-    </section>
   </main>
-  <script>
-    const relativeTime = (isoValue) => {{
-      if (!isoValue) return "Never";
-      const elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(isoValue).getTime()) / 1000));
-      if (elapsedSeconds < 60) return `${{elapsedSeconds}}s ago`;
-      const elapsedMinutes = Math.floor(elapsedSeconds / 60);
-      if (elapsedMinutes < 60) return `${{elapsedMinutes}}m ago`;
-      const elapsedHours = Math.floor(elapsedMinutes / 60);
-      if (elapsedHours < 24) return `${{elapsedHours}}h ago`;
-      const elapsedDays = Math.floor(elapsedHours / 24);
-      return `${{elapsedDays}}d ago`;
-    }};
-
-    const refreshRunTimes = () => {{
-      document.querySelectorAll("[data-run-at]").forEach((element) => {{
-        element.textContent = relativeTime(element.dataset.runAt);
-      }});
-    }};
-
-    const pollJob = async (jobUrl, row) => {{
-      const status = row.querySelector("[data-run-status]");
-      const response = await fetch(jobUrl);
-      if (!response.ok) throw new Error("Could not load job status");
-      const job = await response.json();
-
-      if (job.status === "completed") {{
-        const videoUrl = job.public_video_url || (job.result && job.result.sftp_file && job.result.sftp_file.public_url);
-        status.innerHTML = videoUrl ? `<a class="video-button" href="${{videoUrl}}" target="_blank" rel="noreferrer">Video</a>` : "Complete";
-        return;
-      }}
-
-      if (job.status === "failed") {{
-        status.innerHTML = `<span class="error-text">Failed</span>`;
-        status.title = job.error || "Video generation failed";
-        return;
-      }}
-
-      status.textContent = job.status === "running" ? "Running…" : "Queued…";
-      setTimeout(() => pollJob(jobUrl, row).catch((error) => {{
-        status.innerHTML = `<span class="error-text">${{error.message}}</span>`;
-      }}), 5000);
-    }};
-
-    document.querySelectorAll("[data-run-form]").forEach((form) => {{
-      form.addEventListener("submit", async (event) => {{
-        event.preventDefault();
-        const row = form.closest("tr");
-        const button = form.querySelector("button");
-        const runTime = row.querySelector("[data-run-at]");
-        const status = row.querySelector("[data-run-status]");
-
-        button.disabled = true;
-        status.textContent = "Queued…";
-        try {{
-          const response = await fetch(form.action, {{ method: "POST", headers: {{ Accept: "application/json" }} }});
-          if (!response.ok) throw new Error(await response.text() || "Run failed");
-          const data = await response.json();
-          runTime.dataset.runAt = data.run_at;
-          runTime.textContent = relativeTime(data.run_at);
-          await pollJob(data.status_url, row);
-        }} catch (error) {{
-          status.innerHTML = `<span class="error-text">${{error.message}}</span>`;
-        }} finally {{
-          button.disabled = false;
-        }}
-      }});
-    }});
-
-
-    document.querySelectorAll("[data-review-form]").forEach((form) => {{
-      form.addEventListener("submit", async (event) => {{
-        event.preventDefault();
-        const row = form.closest("tr");
-        const button = form.querySelector("button");
-        const status = row.querySelector("[data-run-status]");
-        const review = row.querySelector("[data-review-tooltip]");
-        const reviewTrigger = row.querySelector("[data-review-tooltip-trigger]");
-
-        button.disabled = true;
-        status.textContent = "Reviewing…";
-        try {{
-          const response = await fetch(form.action, {{ method: "POST", headers: {{ Accept: "application/json" }} }});
-          if (!response.ok) throw new Error(await response.text() || "Review failed");
-          const data = await response.json();
-          review.innerHTML = `<strong>${{escapeHtml(data.title || "Untitled")}}</strong><span>${{escapeHtml(data.body || "")}}</span>`;
-          reviewTrigger.hidden = false;
-          status.textContent = "Review saved";
-        }} catch (error) {{
-          status.innerHTML = `<span class="error-text">${{escapeHtml(error.message)}}</span>`;
-        }} finally {{
-          button.disabled = false;
-        }}
-      }});
-    }});
-
-    document.querySelectorAll("[data-share-form]").forEach((form) => {{
-      form.addEventListener("submit", async (event) => {{
-        event.preventDefault();
-        const row = form.closest("tr");
-        const button = form.querySelector("button");
-        const status = row.querySelector("[data-run-status]");
-
-        button.disabled = true;
-        status.textContent = "Sharing…";
-        try {{
-          const response = await fetch(form.action, {{ method: "POST", headers: {{ Accept: "application/json" }} }});
-          if (!response.ok) throw new Error(await response.text() || "Share failed");
-          const data = await response.json();
-          const count = data.posts ? data.posts.length : 0;
-          status.textContent = `Scheduled ${{count}} Buffer post${{count === 1 ? "" : "s"}}`;
-        }} catch (error) {{
-          status.innerHTML = `<span class="error-text">${{escapeHtml(error.message)}}</span>`;
-        }} finally {{
-          button.disabled = false;
-        }}
-      }});
-    }});
-
-    const escapeHtml = (value) => String(value)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
-
-    refreshRunTimes();
-    setInterval(refreshRunTimes, 10000);
-  </script>
 </body>
 </html>"""
     )
-
 
 @app.get("/gallery", response_class=HTMLResponse)
 def gallery() -> HTMLResponse:
@@ -753,6 +442,37 @@ def youtube_oauth_callback(code: str | None = None, state: str | None = None, er
     token_payload = exchange_youtube_code_for_tokens(code)
     store_youtube_oauth_tokens(token_payload)
     return RedirectResponse("/?youtube=connected", status_code=303)
+
+
+@app.post("/youtube/upload")
+async def upload_youtube_video(
+    video: Annotated[UploadFile, File()],
+    title: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+) -> RedirectResponse:
+    if not video.content_type or not video.content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="Upload one video file.")
+    clean_title = title.strip()
+    clean_description = description.strip()
+    if not clean_title:
+        raise HTTPException(status_code=400, detail="Title is required.")
+    if not clean_description:
+        raise HTTPException(status_code=400, detail="Description is required.")
+
+    work_root = Path(os.getenv("WORK_DIR", "/tmp/steamboy"))
+    work_root.mkdir(parents=True, exist_ok=True)
+    suffix = Path(video.filename or "").suffix or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=work_root) as video_file:
+        shutil.copyfileobj(video.file, video_file)
+        video_path = Path(video_file.name)
+
+    try:
+        upload_video_file_to_youtube(video_path, clean_title, clean_description)
+    finally:
+        video.file.close()
+        video_path.unlink(missing_ok=True)
+
+    return RedirectResponse("/?upload=success", status_code=303)
 
 
 @app.post("/steam-urls")
@@ -1286,13 +1006,28 @@ def is_youtube_api_configured() -> bool:
 
 
 def create_youtube_video_post(record: SteamRecord, text: str, video_url: str) -> BufferSharePost:
+    title = build_buffer_video_title(text or record.title or record.name or "Steamboy video")
+    description = text.strip() or title
+    video_path = download_video_for_youtube_upload(video_url)
+    try:
+        youtube_video_id = upload_video_file_to_youtube(video_path, title, description)
+    finally:
+        video_path.unlink(missing_ok=True)
+
+    return BufferSharePost(
+        id=str(youtube_video_id),
+        channel_id="youtube-api",
+        channel_name="YouTube API",
+        service="youtube",
+        due_at=None,
+    )
+
+
+def upload_video_file_to_youtube(video_path: Path, title: str, description: str) -> str:
     access_token = get_valid_youtube_access_token()
     if not access_token:
         raise HTTPException(status_code=500, detail="YouTube API is not configured. Connect YouTube OAuth or set YOUTUBE_ACCESS_TOKEN.")
 
-    title = build_buffer_video_title(text or record.title or record.name or "Steamboy video")
-    description = text.strip() or title
-    video_path = download_video_for_youtube_upload(video_url)
     try:
         with video_path.open("rb") as video_file:
             initiate_response = requests.post(
@@ -1339,20 +1074,11 @@ def create_youtube_video_post(record: SteamRecord, text: str, video_url: str) ->
         raise HTTPException(status_code=502, detail=f"YouTube API request failed: {exc}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=f"YouTube API returned invalid JSON: {exc}") from exc
-    finally:
-        video_path.unlink(missing_ok=True)
 
     youtube_video_id = payload.get("id")
     if not youtube_video_id:
         raise HTTPException(status_code=502, detail="YouTube API did not return an uploaded video ID")
-
-    return BufferSharePost(
-        id=str(youtube_video_id),
-        channel_id="youtube-api",
-        channel_name="YouTube API",
-        service="youtube",
-        due_at=None,
-    )
+    return str(youtube_video_id)
 
 
 def download_video_for_youtube_upload(video_url: str) -> Path:
