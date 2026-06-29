@@ -1,6 +1,6 @@
 # Steamboy
 
-Steamboy is a FastAPI service for uploading a finished video file directly to YouTube with a title and description. The homepage is now a manual YouTube upload flow: choose one local video file, enter the YouTube title and description, and submit it to the connected YouTube account.
+Steamboy is a FastAPI service for uploading media directly to YouTube with a title and description. The homepage supports a manual YouTube upload flow for one finished video file, plus an image slideshow flow that accepts multiple images, converts them into a vertical MP4 with crossfade transitions, and submits it to the connected YouTube account.
 
 The app still includes the existing Steam-related API and gallery routes for compatibility, but the root homepage no longer downloads or processes video from Steam pages.
 
@@ -8,7 +8,8 @@ The app still includes the existing Steam-related API and gallery routes for com
 
 - Python 3.11+
 - YouTube OAuth credentials, or a development bearer token with the YouTube upload scope
-- Optional, for legacy Steam video processing routes only: `ffmpeg` available on `PATH`, a custom `FFMPEG_BINARY`, or the bundled `imageio-ffmpeg` binary installed from `requirements.txt`
+- `ffmpeg` available on `PATH`, a custom `FFMPEG_BINARY`, or the bundled `imageio-ffmpeg` binary installed from `requirements.txt` for slideshow video rendering
+- Optional, for legacy Steam video processing routes only: the same `ffmpeg` setup is used for trailer processing
 - Optional, for legacy SFTP-backed routes only: SFTP credentials for `vps38164.dreamhostps.com`
 
 ## Configuration
@@ -49,7 +50,7 @@ uvicorn app.main:app --reload
 
 `GET /`
 
-Shows a form for uploading one video file with required `title` and `description` fields. The form posts directly to `/youtube/upload` and does not fetch or process Steam trailer videos.
+Shows two forms: one for uploading a finished video file with required `title` and `description` fields, and another for uploading multiple images that are rendered into a transition slideshow video before YouTube upload. The forms do not fetch or process Steam trailer videos.
 
 `POST /youtube/upload`
 
@@ -60,6 +61,16 @@ Multipart form fields:
 - `description`: YouTube video description
 
 The endpoint uploads the file to YouTube through the configured OAuth connection or `YOUTUBE_ACCESS_TOKEN` fallback. Direct YouTube uploads use the Gaming category and `privacyStatus: "unlisted"`.
+
+`POST /youtube/slideshow`
+
+Multipart form fields:
+
+- `images`: two or more uploaded image files
+- `title`: YouTube video title
+- `description`: YouTube video description
+
+The endpoint normalizes images to a 1080×1920 vertical canvas, creates an MP4 slideshow with smooth crossfade transitions using ffmpeg, and uploads that generated video to YouTube through the same configured OAuth connection or `YOUTUBE_ACCESS_TOKEN` fallback.
 
 ### YouTube OAuth
 
