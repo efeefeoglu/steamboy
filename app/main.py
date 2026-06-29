@@ -42,6 +42,11 @@ GALLERY_IMAGE_TILE_HEIGHT = 540
 SEGMENT_SECONDS = 4
 MAX_SEGMENTS = 10
 MAX_MERGED_DURATION_SECONDS = SEGMENT_SECONDS * MAX_SEGMENTS
+SLIDESHOW_WIDTH = 1080
+SLIDESHOW_HEIGHT = 1920
+SLIDE_SECONDS = 3.0
+SLIDE_TRANSITION_SECONDS = 0.75
+SLIDESHOW_FPS = 24
 REVIEW_PROMPT = (
     "Write a short casual social media reaction/review post with: "
     "a short title, a post body. Add a little humor sauce and body should contain one or two hashtags"
@@ -170,6 +175,8 @@ def dashboard(request: Request) -> HTMLResponse:
         dashboard_message += render_dashboard_alert("YouTube connected successfully.", kind="success")
     if upload_message == "success":
         dashboard_message += render_dashboard_alert("Video uploaded to YouTube successfully.", kind="success")
+    if upload_message == "slideshow-success":
+        dashboard_message += render_dashboard_alert("Slideshow video created and uploaded to YouTube successfully.", kind="success")
 
     return HTMLResponse(
         f"""<!doctype html>
@@ -264,7 +271,7 @@ def dashboard(request: Request) -> HTMLResponse:
   <main>
     <header>
       <h1>Upload to YouTube</h1>
-      <p>Upload one finished video file and publish it to YouTube with your title and description. This flow does not fetch or process Steam trailers.</p>
+      <p>Upload one finished video file, or turn multiple images into a transition slideshow video, and publish it to YouTube with your title and description.</p>
       <div class="header-actions"><a class="button-link" href="/youtube/login">Connect YouTube</a> <a class="button-link secondary" href="/gallery">Gallery</a></div>
     </header>
     {dashboard_message}
@@ -279,6 +286,20 @@ def dashboard(request: Request) -> HTMLResponse:
         <label for="description">Description</label>
         <textarea id="description" name="description" placeholder="YouTube video description" required></textarea>
         <button type="submit">Upload to YouTube</button>
+      </form>
+    </section>
+
+    <section aria-labelledby="slideshow-title">
+      <h2 id="slideshow-title">New image slideshow</h2>
+      <p>Choose multiple images. Steamboy will create a vertical MP4 slideshow with smooth crossfade transitions, then upload it to YouTube.</p>
+      <form method="post" action="/youtube/slideshow" enctype="multipart/form-data">
+        <label for="images">Image files</label>
+        <input id="images" name="images" type="file" accept="image/*" multiple required>
+        <label for="slideshow-title-field">Title</label>
+        <input id="slideshow-title-field" name="title" type="text" maxlength="100" placeholder="YouTube video title" required>
+        <label for="slideshow-description">Description</label>
+        <textarea id="slideshow-description" name="description" placeholder="YouTube video description" required></textarea>
+        <button type="submit">Create slideshow and upload</button>
       </form>
     </section>
   </main>
@@ -442,6 +463,43 @@ def youtube_oauth_callback(code: str | None = None, state: str | None = None, er
     token_payload = exchange_youtube_code_for_tokens(code)
     store_youtube_oauth_tokens(token_payload)
     return RedirectResponse("/?youtube=connected", status_code=303)
+
+
+@app.post("/youtube/slideshow")
+async def upload_youtube_slideshow(
+    images: Annotated[list[UploadFile], File()],
+    title: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+) -> RedirectResponse:
+    clean_title = title.strip()
+    clean_description = description.strip()
+    if not clean_title:
+        raise HTTPException(status_code=400, detail="Title is required.")
+    if not clean_description:
+        raise HTTPException(status_code=400, detail="Description is required.")
+    if len(images) < 2:
+        raise HTTPException(status_code=400, detail="Upload at least two images for a slideshow.")
+    for image in images:
+        if not image.content_type or not image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Upload image files only.")
+
+    ensure_ffmpeg()
+    work_root = Path(os.getenv("WORK_DIR", "/tmp/steamboy"))
+    work_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=work_root) as temp_dir:
+        work_dir = Path(temp_dir)
+        image_paths: list[Path] = []
+        try:
+            for index, image in enumerate(images):
+                image_paths.append(save_uploaded_slideshow_image(image, work_dir, index))
+            video_path = work_dir / "slideshow.mp4"
+            create_slideshow_video(image_paths, video_path)
+            upload_video_file_to_youtube(video_path, clean_title, clean_description)
+        finally:
+            for image in images:
+                image.file.close()
+
+    return RedirectResponse("/?upload=slideshow-success", status_code=303)
 
 
 @app.post("/youtube/upload")
@@ -1021,6 +1079,101 @@ def create_youtube_video_post(record: SteamRecord, text: str, video_url: str) ->
         service="youtube",
         due_at=None,
     )
+
+
+def save_uploaded_slideshow_image(image: UploadFile, work_dir: Path, index: int) -> Path:
+    destination = work_dir / f"slide-{index:03d}.png"
+    try:
+        with Image.open(image.file) as uploaded_image:
+            normalized = Image.new("RGB", (SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT), "#0f172a")
+            converted = uploaded_image.convert("RGB")
+            source_ratio = converted.width / converted.height
+            target_ratio = SLIDESHOW_WIDTH / SLIDESHOW_HEIGHT
+            if source_ratio > target_ratio:
+                resized_height = SLIDESHOW_HEIGHT
+                resized_width = round(resized_height * source_ratio)
+            else:
+                resized_width = SLIDESHOW_WIDTH
+                resized_height = round(resized_width / source_ratio)
+            resized = converted.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
+            left = (resized_width - SLIDESHOW_WIDTH) // 2
+            top = (resized_height - SLIDESHOW_HEIGHT) // 2
+            normalized.paste(resized.crop((left, top, left + SLIDESHOW_WIDTH, top + SLIDESHOW_HEIGHT)))
+            normalized.save(destination, format="PNG")
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Image {index + 1} could not be processed.") from exc
+    return destination
+
+
+def create_slideshow_video(image_paths: list[Path], output_path: Path) -> None:
+    if len(image_paths) < 2:
+        raise HTTPException(status_code=400, detail="At least two images are required to create a slideshow.")
+
+    try:
+        slides = [Image.open(image_path).convert("RGB") for image_path in image_paths]
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="One or more slideshow images could not be read.") from exc
+
+    command = [
+        get_ffmpeg_executable(),
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{SLIDESHOW_WIDTH}x{SLIDESHOW_HEIGHT}",
+        "-r",
+        str(SLIDESHOW_FPS),
+        "-i",
+        "pipe:0",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        assert process.stdin is not None
+        write_slideshow_frames(process.stdin, slides)
+        process.stdin.close()
+        stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
+        completed_code = process.wait()
+    except BrokenPipeError as exc:
+        stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
+        process.wait()
+        raise HTTPException(status_code=500, detail=f"Slideshow video creation failed: {stderr[-1000:]}") from exc
+    finally:
+        for slide in slides:
+            slide.close()
+
+    if completed_code != 0:
+        raise HTTPException(status_code=500, detail=f"Slideshow video creation failed: {stderr[-1000:]}")
+
+
+def write_slideshow_frames(video_stdin: Any, slides: list[Image.Image]) -> None:
+    hold_frames = max(1, round((SLIDE_SECONDS - SLIDE_TRANSITION_SECONDS) * SLIDESHOW_FPS))
+    transition_frames = max(1, round(SLIDE_TRANSITION_SECONDS * SLIDESHOW_FPS))
+
+    for index, slide in enumerate(slides):
+        for _ in range(hold_frames):
+            video_stdin.write(slide.tobytes())
+        if index < len(slides) - 1:
+            next_slide = slides[index + 1]
+            for frame in range(1, transition_frames + 1):
+                alpha = frame / transition_frames
+                blended = Image.blend(slide, next_slide, alpha)
+                try:
+                    video_stdin.write(blended.tobytes())
+                finally:
+                    blended.close()
+    for _ in range(transition_frames):
+        video_stdin.write(slides[-1].tobytes())
 
 
 def upload_video_file_to_youtube(video_path: Path, title: str, description: str) -> str:
