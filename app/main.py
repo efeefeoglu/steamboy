@@ -1109,43 +1109,71 @@ def create_slideshow_video(image_paths: list[Path], output_path: Path) -> None:
     if len(image_paths) < 2:
         raise HTTPException(status_code=400, detail="At least two images are required to create a slideshow.")
 
-    filter_parts = [
-        f"[{index}:v]scale={SLIDESHOW_WIDTH}:{SLIDESHOW_HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={SLIDESHOW_WIDTH}:{SLIDESHOW_HEIGHT},setsar=1,format=rgba[v{index}]"
-        for index in range(len(image_paths))
-    ]
-    previous_label = "v0"
-    for index in range(1, len(image_paths)):
-        output_label = f"xf{index}"
-        offset = (SLIDE_SECONDS - SLIDE_TRANSITION_SECONDS) * index
-        filter_parts.append(
-            f"[{previous_label}][v{index}]xfade=transition=fade:duration={SLIDE_TRANSITION_SECONDS}:offset={offset}[{output_label}]"
-        )
-        previous_label = output_label
-    filter_parts.append(f"[{previous_label}]format=yuv420p[outv]")
+    try:
+        slides = [Image.open(image_path).convert("RGB") for image_path in image_paths]
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="One or more slideshow images could not be read.") from exc
 
-    command = [get_ffmpeg_executable(), "-y"]
-    for image_path in image_paths:
-        command.extend(["-loop", "1", "-t", str(SLIDE_SECONDS), "-i", str(image_path)])
-    command.extend(
-        [
-            "-filter_complex",
-            ";".join(filter_parts),
-            "-map",
-            "[outv]",
-            "-r",
-            str(SLIDESHOW_FPS),
-            "-c:v",
-            "libx264",
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            str(output_path),
-        ]
-    )
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"Slideshow video creation failed: {completed.stderr[-1000:]}")
+    command = [
+        get_ffmpeg_executable(),
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{SLIDESHOW_WIDTH}x{SLIDESHOW_HEIGHT}",
+        "-r",
+        str(SLIDESHOW_FPS),
+        "-i",
+        "pipe:0",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        assert process.stdin is not None
+        write_slideshow_frames(process.stdin, slides)
+        process.stdin.close()
+        stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
+        completed_code = process.wait()
+    except BrokenPipeError as exc:
+        stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
+        process.wait()
+        raise HTTPException(status_code=500, detail=f"Slideshow video creation failed: {stderr[-1000:]}") from exc
+    finally:
+        for slide in slides:
+            slide.close()
+
+    if completed_code != 0:
+        raise HTTPException(status_code=500, detail=f"Slideshow video creation failed: {stderr[-1000:]}")
+
+
+def write_slideshow_frames(video_stdin: Any, slides: list[Image.Image]) -> None:
+    hold_frames = max(1, round((SLIDE_SECONDS - SLIDE_TRANSITION_SECONDS) * SLIDESHOW_FPS))
+    transition_frames = max(1, round(SLIDE_TRANSITION_SECONDS * SLIDESHOW_FPS))
+
+    for index, slide in enumerate(slides):
+        for _ in range(hold_frames):
+            video_stdin.write(slide.tobytes())
+        if index < len(slides) - 1:
+            next_slide = slides[index + 1]
+            for frame in range(1, transition_frames + 1):
+                alpha = frame / transition_frames
+                blended = Image.blend(slide, next_slide, alpha)
+                try:
+                    video_stdin.write(blended.tobytes())
+                finally:
+                    blended.close()
+    for _ in range(transition_frames):
+        video_stdin.write(slides[-1].tobytes())
 
 
 def upload_video_file_to_youtube(video_path: Path, title: str, description: str) -> str:
