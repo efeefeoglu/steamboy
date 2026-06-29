@@ -265,6 +265,45 @@ def dashboard(request: Request) -> HTMLResponse:
       color: #dcfce7;
     }}
     .header-actions {{ margin-top: 16px; }}
+    .image-sorter {{
+      display: grid;
+      gap: 12px;
+      margin: -4px 0 18px;
+    }}
+    .image-sorter:empty {{ display: none; }}
+    .image-sort-card {{
+      align-items: center;
+      background: rgba(30, 41, 59, 0.74);
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 16px;
+      cursor: grab;
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 64px 1fr auto;
+      padding: 10px;
+    }}
+    .image-sort-card.dragging {{ opacity: 0.55; }}
+    .image-sort-card img {{
+      aspect-ratio: 1;
+      border-radius: 12px;
+      object-fit: cover;
+      width: 64px;
+    }}
+    .image-sort-meta {{ min-width: 0; }}
+    .image-sort-name {{
+      color: #f8fafc;
+      font-weight: 800;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .image-sort-help {{ color: #94a3b8; font-size: 0.9rem; margin-top: 4px; }}
+    .image-sort-actions {{ display: inline-flex; gap: 6px; }}
+    .image-sort-actions button {{
+      background: #334155;
+      border-radius: 10px;
+      padding: 8px 10px;
+    }}
   </style>
 </head>
 <body>
@@ -295,6 +334,7 @@ def dashboard(request: Request) -> HTMLResponse:
       <form method="post" action="/youtube/slideshow" enctype="multipart/form-data">
         <label for="images">Image files</label>
         <input id="images" name="images" type="file" accept="image/*" multiple required>
+        <div id="image-sorter" class="image-sorter" aria-live="polite"></div>
         <label for="slideshow-title-field">Title</label>
         <input id="slideshow-title-field" name="title" type="text" maxlength="100" placeholder="YouTube video title" required>
         <label for="slideshow-description">Description</label>
@@ -303,6 +343,86 @@ def dashboard(request: Request) -> HTMLResponse:
       </form>
     </section>
   </main>
+  <script>
+    const imageInput = document.getElementById("images");
+    const imageSorter = document.getElementById("image-sorter");
+    let slideshowFiles = [];
+    let draggedIndex = null;
+
+    function syncImageInput() {{
+      const transfer = new DataTransfer();
+      slideshowFiles.forEach((file) => transfer.items.add(file));
+      imageInput.files = transfer.files;
+    }}
+
+    function moveImage(fromIndex, toIndex) {{
+      if (toIndex < 0 || toIndex >= slideshowFiles.length || fromIndex === toIndex) {{
+        return;
+      }}
+      const [file] = slideshowFiles.splice(fromIndex, 1);
+      slideshowFiles.splice(toIndex, 0, file);
+      syncImageInput();
+      renderImageSorter();
+    }}
+
+    function renderImageSorter() {{
+      imageSorter.innerHTML = "";
+      slideshowFiles.forEach((file, index) => {{
+        const card = document.createElement("div");
+        card.className = "image-sort-card";
+        card.draggable = true;
+        card.dataset.index = String(index);
+
+        const preview = document.createElement("img");
+        preview.alt = "Slide " + (index + 1) + " preview";
+        preview.src = URL.createObjectURL(file);
+        preview.onload = () => URL.revokeObjectURL(preview.src);
+
+        const meta = document.createElement("div");
+        meta.className = "image-sort-meta";
+        const name = document.createElement("div");
+        name.className = "image-sort-name";
+        name.textContent = (index + 1) + ". " + file.name;
+        const help = document.createElement("div");
+        help.className = "image-sort-help";
+        help.textContent = "Drag this slide, or use the arrow buttons to reorder.";
+        meta.append(name, help);
+
+        const actions = document.createElement("div");
+        actions.className = "image-sort-actions";
+        const up = document.createElement("button");
+        up.type = "button";
+        up.textContent = "↑";
+        up.ariaLabel = "Move " + file.name + " earlier";
+        up.disabled = index === 0;
+        up.addEventListener("click", () => moveImage(index, index - 1));
+        const down = document.createElement("button");
+        down.type = "button";
+        down.textContent = "↓";
+        down.ariaLabel = "Move " + file.name + " later";
+        down.disabled = index === slideshowFiles.length - 1;
+        down.addEventListener("click", () => moveImage(index, index + 1));
+        actions.append(up, down);
+
+        card.addEventListener("dragstart", () => {{ draggedIndex = index; card.classList.add("dragging"); }});
+        card.addEventListener("dragend", () => {{ draggedIndex = null; card.classList.remove("dragging"); }});
+        card.addEventListener("dragover", (event) => event.preventDefault());
+        card.addEventListener("drop", (event) => {{
+          event.preventDefault();
+          if (draggedIndex !== null) {{ moveImage(draggedIndex, index); }}
+        }});
+
+        card.append(preview, meta, actions);
+        imageSorter.append(card);
+      }});
+    }}
+
+    imageInput.addEventListener("change", () => {{
+      slideshowFiles = Array.from(imageInput.files);
+      syncImageInput();
+      renderImageSorter();
+    }});
+  </script>
 </body>
 </html>"""
     )
