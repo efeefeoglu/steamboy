@@ -1031,7 +1031,7 @@ def upload_video_file_to_youtube(video_path: Path, title: str, description: str)
     try:
         with video_path.open("rb") as video_file:
             initiate_response = requests.post(
-                f"{YOUTUBE_UPLOAD_API_URL}?part=snippet,status",
+                f"{YOUTUBE_UPLOAD_API_URL}?uploadType=resumable&part=snippet,status",
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json; charset=UTF-8",
