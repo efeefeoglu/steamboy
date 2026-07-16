@@ -309,7 +309,7 @@ def dashboard(request: Request) -> HTMLResponse:
 <body>
   <main>
     <header>
-      <h1>Upload to YouTube</h1>
+      <h1>steamboy</h1>
       <p>Upload one finished video file, or turn multiple images into a transition slideshow video, and publish it to YouTube with your title and description.</p>
       <div class="header-actions"><a class="button-link" href="/youtube/login">Connect YouTube</a> <a class="button-link secondary" href="/gallery">Gallery</a></div>
     </header>
