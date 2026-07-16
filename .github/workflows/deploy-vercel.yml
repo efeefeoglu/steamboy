@@ -1,0 +1,43 @@
+name: Deploy to Vercel Account
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vercel-account-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN_ACCOUNT }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID_ACCOUNT }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_ACCOUNT }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull project configuration
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build project
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy production
+        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
