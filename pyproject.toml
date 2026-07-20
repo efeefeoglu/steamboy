@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "highlight-finder"
+version = "0.1.0"
+description = "Assisted gameplay and trailer highlight finder"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "jinja2>=3.1.4,<4", "numpy>=1.26,<3", "opencv-python-headless>=4.9,<5",
+  "pydantic>=2.7,<3", "scenedetect[opencv]>=0.6.4,<0.7"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2,<9", "ruff>=0.6,<1"]
+
+[project.scripts]
+highlight-finder = "highlight_finder.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/highlight_finder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+ignore = ["E501", "E701", "E702"]
