@@ -1,0 +1,3 @@
+import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
+import { NextResponse } from "next/server";
+export async function POST(request:Request){try{const body=await request.json() as HandleUploadBody;const json=await handleUpload({body,request,onBeforeGenerateToken:async(pathname)=>({allowedContentTypes:["video/mp4","video/quicktime","video/webm","video/x-matroska"],maximumSizeInBytes:250*1024*1024,addRandomSuffix:true,tokenPayload:JSON.stringify({pathname})}),onUploadCompleted:async()=>{}});return NextResponse.json(json)}catch(e){return NextResponse.json({error:e instanceof Error?e.message:"Upload rejected"},{status:400})}}
