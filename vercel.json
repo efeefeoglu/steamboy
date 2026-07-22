@@ -1,1 +1,8 @@
-{"fluid":true,"functions":{"app/api/**/*.ts":{"maxDuration":60},"workflows/**/*.ts":{"maxDuration":300}}}
+{
+  "fluid": true,
+  "functions": {
+    "app/api/**/*.ts": {
+      "maxDuration": 60
+    }
+  }
+}

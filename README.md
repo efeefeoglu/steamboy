@@ -29,7 +29,7 @@ Run the scoring tests with `npm test`. Run a production compile with `npm run bu
 ## Vercel deployment
 
 1. Create a Vercel project and a Blob store, then connect this repository.
-2. Enable **Fluid Compute** (also declared in `vercel.json`) and Vercel Workflow for the project.
+2. Enable **Fluid Compute** (also declared in `vercel.json`) and Vercel Workflow for the project. Workflow source files are intentionally not listed under the `functions` configuration: the Workflow compiler discovers them through the API route import, and Vercel rejects non-route workflow source patterns as unmatched Serverless Functions.
 3. Add environment variables in every relevant environment:
 
 | Variable | Required | Purpose |
